@@ -1,0 +1,15 @@
+{
+  "name": "suvo",
+  "local_port": 54945,
+  "entrypoint": "bun run dev",
+  "publish": {
+    "label": "suvo",
+    "type": "http",
+    "entrypoint": "bun run prod",
+    "published_port": 51644,
+    "env": {
+      "NODE_ENV": "production",
+      "ZO_CLIENT_IDENTITY_TOKEN": "none"
+    }
+  }
+}

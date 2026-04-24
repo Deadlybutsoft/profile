@@ -1,0 +1,2013 @@
+import '@/lib/types';
+import React, { Suspense } from 'react';
+import { Canvas, useFrame } from '@react-three/fiber';
+import { Environment, Stars, useProgress } from '@react-three/drei';
+import * as THREE from 'three';
+import { Hallway } from './Hallway';
+// Lazy load Room to prevent downloading all assets at start
+const RoomLazy = React.lazy(() => import('./Room').then(module => ({ default: module.Room })));
+import { Door } from './Door';
+import { Player } from './Player';
+import ModernRemote from './ModernRemote';
+import { sfx } from '@/lib/sfx';
+
+// Component that signals when the 3D scene has actually rendered
+const SceneReady: React.FC<{ onReady: () => void }> = ({ onReady }) => {
+  const called = React.useRef(false);
+
+  useFrame(() => {
+    // Only call once after first frame renders
+    if (!called.current) {
+      called.current = true;
+      // Small delay to ensure everything is painted
+      setTimeout(onReady, 100);
+    }
+  });
+
+  return null;
+};
+
+export const Scene: React.FC = () => {
+  const xOffset = -3.3;
+  const [isDoorOpen, setIsDoorOpen] = React.useState(false);
+  const [enteredRoom, setEnteredRoom] = React.useState(false);
+
+  // Expanded Room States
+  const [lightsOn, setLightsOn] = React.useState(true);
+  const [lightColor, setLightColor] = React.useState('#ffffff');
+  const [lightIntensity, setLightIntensity] = React.useState(1.5);
+  const [hexagonLightsOn, setHexagonLightsOn] = React.useState(true);
+  const [fanSpeed, setFanSpeed] = React.useState(2); // 0 (off) to 5 (max)
+  const [showRemote, setShowRemote] = React.useState(false);
+  const [roomMode, setRoomMode] = React.useState<'normal' | 'night' | 'party'>('normal');
+  const [isMusicPlaying, setIsMusicPlaying] = React.useState(false);
+  const [showAboutPopup, setShowAboutPopup] = React.useState(false);
+  const [showWardrobePopup, setShowWardrobePopup] = React.useState(false);
+  const [showSkillsPopup, setShowSkillsPopup] = React.useState(false);
+  const [activeSkillCategory, setActiveSkillCategory] = React.useState(0);
+  const audioRef = React.useRef<HTMLAudioElement | null>(null);
+
+  // Phase-based loading: 
+  //  - 'initial': only Hallway + Player + Door assets load (progress shows ~50%)
+  //  - 'hallway-done': user has moved past start, Room assets begin loading in background
+  //  - 'room-done': Room fully loaded, next trigger is door click
+  //  - 'door-click': door popup images start loading
+  const [loadingPhase, setLoadingPhase] = React.useState<'initial' | 'hallway-done' | 'room-done'>('initial');
+  
+  // Lazy Loading States
+  const [loadRoom, setLoadRoom] = React.useState(false);  // Room textures load in background
+  const [loadDoorPopup, setLoadDoorPopup] = React.useState(false);  // Project images load on door click
+
+  // Door click handler - triggers Room background load + popup image preloading
+  const handleDoorClick = React.useCallback(() => {
+    sfx.playSwitch();
+    // Phase 2: Start loading Room assets in background (user clicked door to enter)
+    if (!loadRoom) {
+      setLoadRoom(true);
+      setLoadingPhase('hallway-done');
+    }
+    // Phase 3: Preload project images for the popup (load silently, don't block)
+    if (!loadDoorPopup) {
+      setLoadDoorPopup(true);
+    }
+  }, [loadRoom, loadDoorPopup]);
+
+  // Track how many door popup images are loaded (for progress estimation)
+  const [doorPopupLoaded, setDoorPopupLoaded] = React.useState(0);
+  const doorPopupTotal = 8; // number of project images in door popup
+
+  // Preload door popup images when loadDoorPopup becomes true
+  React.useEffect(() => {
+    if (!loadDoorPopup) return;
+    const images = [
+      '/locate_that.jpg', '/suvo_store.png', '/portfolio_cover.png',
+      '/suvo_writer.png', '/hugo_app.png', '/touzi.jpg',
+      '/about-bg.png', '/bg-music.mp3'
+    ];
+    let loaded = 0;
+    images.forEach(src => {
+      const img = new Image();
+      img.onload = () => {
+        loaded++;
+        setDoorPopupLoaded(loaded);
+      };
+      img.onerror = () => {
+        loaded++;
+        setDoorPopupLoaded(loaded);
+      };
+      img.src = src;
+    });
+  }, [loadDoorPopup]);
+
+  // Loading Logic - True asset tracking
+  const { progress, active, loaded, total } = useProgress();
+  const [hasStarted, setHasStarted] = React.useState(false);
+  const [forceLoad, setForceLoad] = React.useState(false);
+  const [displayProgress, setDisplayProgress] = React.useState(0);
+  const [sceneRendered, setSceneRendered] = React.useState(false);
+
+  // Callback for when scene actually renders its first frame
+  const handleSceneReady = React.useCallback(() => {
+    setSceneRendered(true);
+  }, []);
+
+  // Smooth progress animation - follows real progress
+  React.useEffect(() => {
+    const targetProgress = Math.min(progress, 100);
+
+    // Faster animation to catch up with real progress
+    const animate = () => {
+      setDisplayProgress(prev => {
+        const diff = targetProgress - prev;
+        if (Math.abs(diff) < 1) return targetProgress;
+        return prev + diff * 0.15; // 15% of remaining distance per frame
+      });
+    };
+
+    const animationFrame = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(animationFrame);
+  }, [progress, displayProgress]);
+
+  // True loading complete - assets loaded AND scene has rendered
+  const assetsLoaded = !active && progress >= 100;
+  const isLoaded = (assetsLoaded && sceneRendered) || forceLoad;
+
+  // Use deferred state update to avoid suspending the main UI
+  const [, startTransition] = React.useTransition();
+
+  // Phase 2: Start loading Room assets in background right after initial loading screen ends (not on door click)
+  React.useEffect(() => {
+    if (isLoaded && !loadRoom) {
+      startTransition(() => {
+        setLoadRoom(true);
+        setLoadingPhase('hallway-done');
+      });
+    }
+  }, [isLoaded, loadRoom]);
+
+  // NOTE: Room is NOT auto-loaded. It only starts loading when user clicks the door.
+  // This keeps initial loading to just Hallway + Player + Door (~50% of assets).
+
+  // Background Music Logic
+  React.useEffect(() => {
+    const audio = new Audio('/bg-music.mp3');
+    audio.loop = true;
+    audio.volume = 0.3;
+    audioRef.current = audio;
+
+    // Safety fallback - only if something goes wrong (20 seconds)
+    const fallbackTimer = setTimeout(() => {
+      console.warn('Loading fallback triggered - forcing load');
+      setForceLoad(true);
+    }, 20000);
+
+    return () => {
+      audio.pause();
+      clearTimeout(fallbackTimer);
+    };
+  }, []);
+
+  // Auto-start when truly loaded
+  React.useEffect(() => {
+    if (isLoaded && !hasStarted) {
+      handleStart();
+    }
+  }, [isLoaded, hasStarted]);
+
+  const handleStart = () => {
+    setHasStarted(true);
+    if (audioRef.current) {
+      audioRef.current.play().then(() => {
+        setIsMusicPlaying(true);
+      }).catch(e => {
+        console.log('Autoplay prevented. Music will start on next interaction.', e);
+        setIsMusicPlaying(false);
+
+        // Setup a one-time listener for the first interaction to start the music
+        const playOnInteraction = () => {
+          if (audioRef.current && !isMusicPlaying) {
+            audioRef.current.play().then(() => {
+              setIsMusicPlaying(true);
+              // Remove all listeners once played
+              ['click', 'keydown', 'touchstart', 'pointerdown', 'wheel'].forEach(event =>
+                window.removeEventListener(event, playOnInteraction)
+              );
+            }).catch(() => { });
+          }
+        };
+        // Add listeners for ANY interaction
+        ['click', 'keydown', 'touchstart', 'pointerdown', 'wheel'].forEach(event =>
+          window.addEventListener(event, playOnInteraction, { once: true, passive: true })
+        );
+      });
+    }
+  };
+
+
+  const toggleMusic = () => {
+    sfx.playSwitch();
+    if (audioRef.current) {
+      if (isMusicPlaying) {
+        audioRef.current.pause();
+      } else {
+        audioRef.current.play();
+      }
+      setIsMusicPlaying(!isMusicPlaying);
+    }
+  };
+
+  // Close Popups on Scroll
+  React.useEffect(() => {
+    if (!showAboutPopup && !showWardrobePopup && !showSkillsPopup) return;
+
+    let scrollAccumulator = 0;
+    const threshold = 30; // Threshold to prevent accidental closing
+
+    const handleScroll = (e: WheelEvent | TouchEvent) => {
+      if (e instanceof WheelEvent) {
+        scrollAccumulator += Math.abs(e.deltaY);
+      } else if (e instanceof TouchEvent) {
+        scrollAccumulator += 10;
+      }
+
+      if (scrollAccumulator > threshold) {
+        setShowAboutPopup(false);
+        setShowWardrobePopup(false);
+        setShowSkillsPopup(false);
+      }
+    };
+
+    window.addEventListener('wheel', handleScroll, { passive: true });
+    window.addEventListener('touchmove', handleScroll, { passive: true });
+
+    return () => {
+      window.removeEventListener('wheel', handleScroll);
+      window.removeEventListener('touchmove', handleScroll);
+    };
+  }, [showAboutPopup, showWardrobePopup, showSkillsPopup]);
+
+  // Auto-slide effect for Skills Carousel
+  React.useEffect(() => {
+    if (!showSkillsPopup) return;
+    const interval = setInterval(() => {
+      setActiveSkillCategory((prev) => (prev === 4 ? 0 : prev + 1));
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [showSkillsPopup]);
+
+  return (
+    <div className="w-full h-full relative">
+      {/* SIMPLE LOADING SCREEN */}
+      <div
+        onClick={() => hasStarted && handleStart()}
+        style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100vw',
+          height: '100vh',
+          background: '#000000',
+          zIndex: 99999,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: '#ffffff',
+          transition: 'opacity 0.6s ease',
+          opacity: hasStarted ? 0 : 1,
+          pointerEvents: hasStarted ? 'none' : 'auto',
+          visibility: isLoaded && hasStarted ? 'hidden' : 'visible',
+        }}>
+
+        <div style={{
+          fontFamily: '"Instrument Serif", serif',
+          fontSize: '2rem',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: '8px',
+          opacity: 0.8
+        }}>
+          <div style={{ display: 'flex', gap: '15px' }}>
+            <span>Loading</span>
+            <span>{Math.round(displayProgress)}%</span>
+          </div>
+          {total > 0 && (
+            <div style={{ fontSize: '0.9rem', opacity: 0.5 }}>
+              {loaded} / {total} assets
+            </div>
+          )}
+          {displayProgress >= 80 && (
+            <div style={{
+              marginTop: '24px',
+              fontSize: '1rem',
+              opacity: 0.7,
+              fontFamily: '"Bricolage Grotesque", sans-serif',
+              letterSpacing: '0.05em',
+              textAlign: 'center',
+              color: 'rgba(255,255,255,0.8)'
+            }}>
+              Click anywhere to enter
+            </div>
+          )}
+        </div>
+      </div>
+
+      <Canvas
+        shadows
+        dpr={[1, 2]}
+        camera={{ fov: 60, position: [xOffset, 1.7, 0] }}
+        className="w-full h-full bg-black"
+      >
+        <Suspense fallback={null}>
+          {/* Signals when scene has actually rendered */}
+          <SceneReady onReady={handleSceneReady} />
+
+          <ambientLight intensity={roomMode === 'night' ? 0.02 : (roomMode === 'party' ? 0.05 : 0.4)} color="#ffffff" />
+          <Environment
+            preset="city"
+            environmentIntensity={roomMode === 'night' ? 0.01 : (roomMode === 'party' ? 0.1 : 1)}
+          />
+
+          <group position={[xOffset, 0, 0]}>
+            <Hallway />
+          </group>
+
+          {loadRoom && (
+            <Suspense fallback={null}>
+              <RoomLazy
+                lightsOn={lightsOn}
+                lightColor={lightColor}
+                lightIntensity={lightIntensity}
+                hexagonLightsOn={hexagonLightsOn}
+                fanSpeed={fanSpeed}
+                roomMode={roomMode}
+                showRemote={showRemote}
+                isDoorOpen={isDoorOpen}
+                onToggleRemote={() => setShowRemote(!showRemote)}
+                onToggleWardrobe={() => setShowWardrobePopup(true)}
+                onToggleSkills={() => setShowSkillsPopup(true)}
+                isPopupOpen={showAboutPopup || showWardrobePopup || showSkillsPopup}
+              />
+            </Suspense>
+          )}
+
+          <Door position={[xOffset, 0, -4]} isOpen={isDoorOpen} setIsOpen={setIsDoorOpen} enteredRoom={enteredRoom} hideLabel={!hasStarted} onInteract={handleDoorClick} />
+          <Stars radius={100} depth={50} count={2000} factor={4} saturation={0} fade speed={1} />
+          <Player
+            isDoorOpen={isDoorOpen}
+            isAboutOpen={showAboutPopup}
+            onRoomReached={() => {
+              setEnteredRoom(true);
+              setShowAboutPopup(true);
+              setRoomMode('normal');
+              setFanSpeed(2);
+              sfx.playPopup();
+            }}
+          />
+        </Suspense>
+      </Canvas>
+
+      {/* ENHANCED 2D REMOTE OVERLAY */}
+      {
+        showRemote && (
+          <div style={{
+            position: 'fixed',
+            bottom: '40px',
+            right: '40px',
+            zIndex: 9999,
+          }}>
+            <ModernRemote
+              mode={roomMode === 'normal' ? 'NORM' : roomMode === 'night' ? 'NIGHT' : 'PARTY'}
+              setMode={(m) => {
+                if (m === 'NORM') {
+                  setRoomMode('normal');
+                  setLightsOn(true);
+                  setHexagonLightsOn(true);
+                  setFanSpeed(2);
+                  setLightIntensity(1.5);
+                } else if (m === 'NIGHT') {
+                  setRoomMode('night');
+                  setLightsOn(false);
+                  setHexagonLightsOn(false);
+                  setFanSpeed(1);
+                } else {
+                  setRoomMode('party');
+                  setLightsOn(true);
+                  setHexagonLightsOn(true);
+                  setFanSpeed(5);
+                }
+              }}
+              fanOn={fanSpeed > 0}
+              setFanOn={(on) => setFanSpeed(on ? 2 : 0)}
+              onClose={() => setShowRemote(false)}
+            />
+          </div>
+        )
+      }
+
+      {/* BLACK OVERLAY TRANSITION - Removed as it is now integrated into the popup */}
+
+      {/* MUSIC TOGGLE BUTTON */}
+      <div
+        onClick={toggleMusic}
+        style={{
+          position: 'fixed',
+          bottom: '20px',
+          right: '20px',
+          zIndex: 10000,
+          width: '44px',
+          height: '44px',
+          borderRadius: '50%',
+          background: 'rgba(255, 255, 255, 0.1)',
+          backdropFilter: 'blur(10px)',
+          border: '1px solid rgba(255, 255, 255, 0.2)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          cursor: 'pointer',
+          color: 'white',
+          fontSize: '20px',
+          transition: 'all 0.3s ease',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
+        }}
+        onMouseOver={(e) => {
+          e.currentTarget.style.background = 'rgba(255, 255, 255, 0.2)';
+          e.currentTarget.style.transform = 'scale(1.1)';
+        }}
+        onMouseOut={(e) => {
+          e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)';
+          e.currentTarget.style.transform = 'scale(1)';
+        }}
+      >
+        {isMusicPlaying ? '♪' : '🔇'}
+      </div>
+
+      {/* MOVEMENT CONTROLS LABEL - Bottom Left */}
+      {
+        hasStarted && !showAboutPopup && !showWardrobePopup && !showSkillsPopup && (
+          <div style={{
+            position: 'fixed',
+            bottom: '24px',
+            left: '24px',
+            zIndex: 10000,
+            fontFamily: '"Outfit", sans-serif',
+            color: 'rgba(255, 255, 255, 0.5)',
+            fontSize: '11px',
+            letterSpacing: '0.5px',
+          }}>
+            Use arrow keys to move
+          </div>
+        )
+      }
+
+      {/* ABOUT POPUP - Full Screen Redesign with Paper Reveal Effect */}
+      <div style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        width: '100vw',
+        height: '100vh',
+        zIndex: 99998,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'rgba(5, 5, 5, 0.85)',
+        backdropFilter: 'blur(30px)',
+        opacity: showAboutPopup ? 1 : 0,
+        pointerEvents: showAboutPopup ? 'auto' : 'none',
+        transition: 'all 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
+        overflow: 'hidden',
+      }}>
+        <div style={{
+          width: '100vw',
+          height: '100vh',
+          backgroundImage: 'url(/about-bg.png)',
+          backgroundSize: 'cover',
+          backgroundPosition: 'center',
+          backgroundRepeat: 'no-repeat',
+          position: 'relative',
+          transform: showAboutPopup ? 'scale(1) rotate(0deg)' : 'scale(0.9) rotate(2deg)',
+          opacity: showAboutPopup ? 1 : 0,
+          filter: showAboutPopup ? 'blur(0px)' : 'blur(10px)',
+          transition: 'all 0.8s cubic-bezier(0.16, 1, 0.3, 1)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '40px',
+          color: '#2a1b12',
+          overflow: 'hidden',
+        }}>
+
+          {/* PAPER REVEAL EFFECT - Slides upward to reveal content */}
+          <div style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: '100%',
+            height: 'calc(100% + 60px)', // Extra height for torn edge
+            background: 'linear-gradient(to bottom, #f5f0e6 0%, #ebe4d4 50%, #e2dbc8 100%)',
+            transform: showAboutPopup ? 'translateY(-100%)' : 'translateY(0)',
+            transition: 'transform 1.2s cubic-bezier(0.77, 0, 0.175, 1) 0.1s',
+            zIndex: 5,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            filter: 'drop-shadow(0 15px 25px rgba(0,0,0,0.25))',
+          }}>
+            {/* Paper texture lines */}
+            <div style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: '60px',
+              backgroundImage: 'repeating-linear-gradient(0deg, transparent, transparent 30px, rgba(139, 69, 19, 0.03) 30px, rgba(139, 69, 19, 0.03) 31px)',
+              pointerEvents: 'none',
+            }} />
+
+            {/* TORN PAPER EDGE - SVG at bottom */}
+            <svg
+              style={{
+                position: 'absolute',
+                bottom: 0,
+                left: 0,
+                width: '100%',
+                height: '60px',
+                pointerEvents: 'none',
+              }}
+              viewBox="0 0 1200 60"
+              preserveAspectRatio="none"
+            >
+              <path
+                d="M0,0 
+                   L0,20 
+                   C15,22 25,35 40,28 
+                   C55,21 60,38 80,32 
+                   C95,26 105,42 120,35 
+                   C140,26 150,45 170,38 
+                   C185,32 200,50 220,40 
+                   C240,32 255,50 280,42 
+                   C300,35 320,52 340,44 
+                   C360,36 380,55 400,46 
+                   C420,38 440,56 460,48 
+                   C480,40 500,58 520,50 
+                   C545,41 560,60 580,52 
+                   C600,44 620,58 650,50 
+                   C680,42 700,60 720,52 
+                   C740,44 760,58 790,50 
+                   C820,42 840,60 860,52 
+                   C880,44 905,62 930,54 
+                   C955,46 975,56 1000,48 
+                   C1025,40 1055,58 1080,50 
+                   C1105,42 1135,55 1160,48 
+                   C1180,42 1195,50 1200,45
+                   L1200,0 
+                   Z"
+                fill="#e2dbc8"
+              />
+              {/* Secondary torn edge for depth */}
+              <path
+                d="M0,0 
+                   L0,15 
+                   C20,18 35,28 50,22 
+                   C70,15 85,30 100,24 
+                   C120,17 140,32 160,26 
+                   C180,19 200,35 225,28 
+                   C250,21 270,38 295,30 
+                   C320,23 345,40 370,32 
+                   C395,25 420,42 445,34 
+                   C470,27 495,44 520,36 
+                   C545,29 570,46 600,38 
+                   C630,30 655,48 680,40 
+                   C705,32 735,50 760,42 
+                   C785,34 815,52 840,44 
+                   C865,36 895,64 920,46 
+                   C945,38 975,56 1000,48 
+                   C1025,40 1055,58 1080,50 
+                   C1105,42 1135,55 1160,48 
+                   C1180,42 1195,50 1200,45
+                   L1200,0 
+                   Z"
+                fill="#ebe4d4"
+              />
+            </svg>
+
+            {/* Subtle paper logo or text */}
+            <div style={{
+              fontFamily: '"Instrument Serif", serif',
+              fontSize: '3rem',
+              color: 'rgba(139, 69, 19, 0.15)',
+              letterSpacing: '0.5em',
+              textTransform: 'uppercase',
+              marginBottom: '60px', // Offset for torn edge
+            }}>
+              Portfolio
+            </div>
+          </div>
+
+          {/* Close Button - Hand Drawn Style */}
+          <div
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowAboutPopup(false);
+              sfx.playClose();
+            }}
+            className="hand-drawn-close-btn"
+            style={{
+              position: 'absolute',
+              top: '40px',
+              right: '60px',
+              width: '80px',
+              height: '80px',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              cursor: 'pointer',
+              zIndex: 10,
+              opacity: showAboutPopup ? 1 : 0,
+              transition: 'opacity 0.5s ease 1.3s',
+            }}
+          >
+            <svg width="80" height="80" viewBox="0 0 100 100">
+              <path
+                d="M50 15c12-1 28 5 33 22 5 17-6 36-23 40-17 4-37-10-38-28-1-18 11-32 28-34"
+                fill="none"
+                stroke="#2a1b12"
+                strokeWidth="3.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity="0.7"
+              />
+              <path
+                className="cross-line line-1"
+                d="M35 37c8 6 22 19 30 26"
+                fill="none"
+                stroke="#2a1b12"
+                strokeWidth="3.5"
+                strokeLinecap="round"
+                opacity="0.8"
+                style={{ transformOrigin: 'center', transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)' }}
+              />
+              <path
+                className="cross-line line-2"
+                d="M65 37c-7 8-23 20-30 26"
+                fill="none"
+                stroke="#2a1b12"
+                strokeWidth="3.5"
+                strokeLinecap="round"
+                opacity="0.8"
+                style={{ transformOrigin: 'center', transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)' }}
+              />
+            </svg>
+          </div>
+
+          {/* Content Container - Modern Editorial Style */}
+          <div style={{
+            maxWidth: '1000px',
+            textAlign: 'center',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: '40px',
+            transform: showAboutPopup ? 'translateY(0)' : 'translateY(60px)',
+            opacity: showAboutPopup ? 1 : 0,
+            transition: 'all 1s cubic-bezier(0.16, 1, 0.3, 1) 0.8s',
+          }}>
+            {/* Hero Name Section with Integrated Profile Image */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '40px',
+              position: 'relative',
+            }}>
+              {/* Decorative Doodles - Top Left Sparkle */}
+              <svg style={{
+                position: 'absolute',
+                top: '-40px',
+                left: '10%',
+                width: '40px',
+                height: '40px',
+                opacity: showAboutPopup ? 0.3 : 0,
+                transition: 'opacity 0.6s ease 1.4s',
+              }} viewBox="0 0 100 100">
+                <path d="M50 10 L50 90 M10 50 L90 50 M25 25 L75 75 M75 25 L25 75" stroke="#8b4513" strokeWidth="4" strokeLinecap="round" />
+              </svg>
+
+              {/* Decorative Doodles - Bottom Right Circle */}
+              <svg style={{
+                position: 'absolute',
+                bottom: '-20px',
+                right: '15%',
+                width: '30px',
+                height: '30px',
+                opacity: showAboutPopup ? 0.2 : 0,
+                transition: 'opacity 0.6s ease 1.5s',
+              }} viewBox="0 0 100 100">
+                <circle cx="50" cy="50" r="40" fill="none" stroke="#8b4513" strokeWidth="6" strokeDasharray="10 12" />
+              </svg>
+              <div style={{ position: 'relative' }}>
+                <h1 style={{
+                  margin: 0,
+                  fontSize: '8.5rem',
+                  fontFamily: '"Instrument Serif", serif',
+                  fontWeight: '400',
+                  color: '#2a1b12',
+                  lineHeight: '1',
+                  letterSpacing: '-2px',
+                  whiteSpace: 'nowrap'
+                }}>
+                  Hey, I am Suvo
+                </h1>
+
+                {/* Refined Hand-drawn Underline specifically under 'Suvo' */}
+                <svg
+                  style={{ position: 'absolute', bottom: '-10px', left: '55%', width: '45%', height: '30px' }}
+                  viewBox="0 0 150 30"
+                >
+                  {/* First Stroke */}
+                  <path
+                    d="M10 15c20-2 80-5 130 2"
+                    fill="none"
+                    stroke="#8b4513"
+                    strokeWidth="3.5"
+                    strokeLinecap="round"
+                    style={{
+                      strokeDasharray: 200,
+                      strokeDashoffset: showAboutPopup ? 0 : 200,
+                      transition: 'stroke-dashoffset 1s ease 1.2s'
+                    }}
+                  />
+                  {/* Second Scribble Stroke */}
+                  <path
+                    d="M15 22c30 1 70-2 120-1"
+                    fill="none"
+                    stroke="#8b4513"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    opacity="0.5"
+                    style={{
+                      strokeDasharray: 200,
+                      strokeDashoffset: showAboutPopup ? 0 : 200,
+                      transition: 'stroke-dashoffset 1s ease 1.4s'
+                    }}
+                  />
+                </svg>
+              </div>
+
+              {/* Profile Image - Sticker Mode */}
+              <div style={{
+                position: 'relative',
+                width: '150px',
+                height: '150px',
+                flexShrink: 0,
+                transform: showAboutPopup ? 'rotate(-2deg) scale(1)' : 'rotate(-10deg) scale(0.8)',
+                opacity: showAboutPopup ? 1 : 0,
+                transition: 'all 0.8s cubic-bezier(0.34, 1.56, 0.64, 1) 1s',
+              }}>
+                {/* Decorative Background Shadow/Border */}
+                <div style={{
+                  position: 'absolute',
+                  top: '8px',
+                  left: '8px',
+                  width: '100%',
+                  height: '100%',
+                  backgroundColor: 'rgba(42, 27, 18, 0.08)',
+                  borderRadius: '24px',
+                  zIndex: 0
+                }} />
+
+                {/* Outer Brown Border */}
+                <div style={{
+                  position: 'absolute',
+                  top: '4px',
+                  left: '4px',
+                  width: '100%',
+                  height: '100%',
+                  border: '2.5px solid #8b4513',
+                  borderRadius: '24px',
+                  zIndex: 1
+                }} />
+
+                {/* Main Sticker Container (White Cut-out) */}
+                <div style={{
+                  position: 'relative',
+                  width: '100%',
+                  height: '100%',
+                  backgroundColor: '#ffffff',
+                  padding: '7px',
+                  borderRadius: '24px',
+                  border: '2.5px solid #2a1b12',
+                  zIndex: 2,
+                  boxShadow: '0 8px 30px rgba(0,0,0,0.12)'
+                }}>
+                  {/* Image with rounded corners matching the sticker */}
+                  <div style={{
+                    width: '100%',
+                    height: '100%',
+                    borderRadius: '17px',
+                    overflow: 'hidden',
+                  }}>
+                    <img
+                      src="/profile_new.jpg"
+                      alt="Suvo"
+                      style={{
+                        width: '100%',
+                        height: '100%',
+                        objectFit: 'cover'
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div style={{
+              marginTop: '40px',
+              fontFamily: '"Bricolage Grotesque", sans-serif',
+              fontSize: '1.4rem',
+              lineHeight: '1.6',
+              color: '#3e2723',
+              fontWeight: '400',
+              padding: '0 60px',
+              maxWidth: '850px',
+              letterSpacing: '0.01em',
+              opacity: showAboutPopup ? 1 : 0,
+              transform: showAboutPopup ? 'translateY(0)' : 'translateY(20px)',
+              transition: 'all 0.8s ease 1.1s',
+              textAlign: 'center'
+            }}>
+              A <strong style={{ color: '#8b4513', fontWeight: '600' }}>full-stack web developer</strong> focused on building scalable, efficient, and user-centric web applications. I work across both frontend and backend, translating product requirements into reliable, production-ready solutions.
+            </div>
+
+          </div>
+
+          {/* Down Arrow Indicator */}
+          <div style={{
+            position: 'absolute',
+            bottom: '50px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            opacity: showAboutPopup ? 0.7 : 0,
+            transition: 'opacity 0.8s ease 1.5s',
+            zIndex: 20
+          }} className="animate-bounce">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#2a1b12" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 5v14M19 12l-7 7-7-7" />
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      {/* WARDROBE POPUP - BORED APE STYLE FLOATING PROJECTS */}
+      <div
+        style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100vw',
+          height: '100vh',
+          zIndex: 99998,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: '#0a0a0a url("/project_bg.png")',
+          backgroundSize: 'cover',
+          backgroundPosition: 'center',
+          opacity: showWardrobePopup ? 1 : 0,
+          pointerEvents: showWardrobePopup ? 'auto' : 'none',
+          transition: 'all 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
+          overflow: 'hidden',
+        }}
+        onMouseMove={(e) => {
+          if (!showWardrobePopup) return;
+          const cards = document.querySelectorAll('.floating-project-card');
+          const centerX = window.innerWidth / 2;
+          const centerY = window.innerHeight / 2;
+          const mouseX = e.clientX;
+          const mouseY = e.clientY;
+
+          cards.forEach((card, index) => {
+            const htmlCard = card as HTMLElement;
+            const speed = -(0.35 + (index * 0.08));
+            const offsetX = (mouseX - centerX) * speed;
+            const offsetY = (mouseY - centerY) * speed;
+            htmlCard.style.setProperty('--mouse-x', `${offsetX}px`);
+            htmlCard.style.setProperty('--mouse-y', `${offsetY}px`);
+          });
+        }}
+      >
+
+
+        {/* Close Button - Hand Drawn Style (Synced with Skills) */}
+        <div
+          onClick={(e) => {
+            e.stopPropagation();
+            setShowWardrobePopup(false);
+            sfx.playClose();
+          }}
+          className="hand-drawn-close-btn"
+          style={{
+            position: 'fixed',
+            top: '40px',
+            right: '60px',
+            width: '80px',
+            height: '80px',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: 'pointer',
+            zIndex: 1000
+          }}
+        >
+          <svg width="80" height="80" viewBox="0 0 100 100">
+            <path
+              d="M50 15c12-1 28 5 33 22 5 17-6 36-23 40-17 4-37-10-38-28-1-18 11-32 28-34"
+              fill="none"
+              stroke="#f6f1e6"
+              strokeWidth="3.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity="1"
+            />
+            <path
+              className="cross-line line-1"
+              d="M35 37c8 6 22 19 30 26"
+              fill="none"
+              stroke="#f6f1e6"
+              strokeWidth="3.5"
+              strokeLinecap="round"
+              opacity="0.8"
+              style={{ transformOrigin: 'center', transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)' }}
+            />
+            <path
+              className="cross-line line-2"
+              d="M65 37c-7 8-23 20-30 26"
+              fill="none"
+              stroke="#f6f1e6"
+              strokeWidth="3.5"
+              strokeLinecap="round"
+              opacity="0.8"
+              style={{ transformOrigin: 'center', transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)' }}
+            />
+          </svg>
+        </div>
+
+
+
+        {/* Floating Project Cards */}
+        {showWardrobePopup && (
+          <div className="floating-cards-container">
+            {/* Project 1 - Suvo AI (Extreme Top) */}
+            <div
+              className="floating-project-card"
+              onClick={() => window.open('https://suvo-ai.vercel.app', '_blank')}
+              style={{
+                position: 'absolute',
+                top: '12%',
+                left: '8%',
+                transform: 'translate(-50%, 0) rotate(0deg) translate(var(--mouse-x, 0px), var(--mouse-y, 0px))',
+                width: '200px',
+                cursor: 'pointer',
+                zIndex: 10,
+                opacity: showWardrobePopup ? 1 : 0,
+                transition: 'all 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
+                '--mouse-x': '0px',
+                '--mouse-y': '0px',
+              } as React.CSSProperties}
+              onMouseOver={(e) => {
+                e.currentTarget.style.zIndex = '50';
+              }}
+              onMouseOut={(e) => {
+                e.currentTarget.style.zIndex = '10';
+              }}
+            >
+              <div style={{
+                borderRadius: '0',
+                overflow: 'hidden',
+                border: '4px solid #1a1a1a',
+                boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+                background: '#000',
+                position: 'relative',
+              }}>
+                <img
+                  src="/suvo_ai.png"
+                  alt="Suvo AI"
+                  style={{
+                    width: '100%',
+                    height: '200px',
+                    objectFit: 'cover',
+                    display: 'block',
+                  }}
+                />
+              </div>
+              <div className="click-to-view-text">
+                Click to view
+              </div>
+              <div className="project-text">
+                <h3>SUVO AI</h3>
+                <p>
+                  An intelligent AI assistant built to demonstrate interaction capabilities.
+                </p>
+              </div>
+            </div>
+
+            {/* Project 2 - LocateThat (Extreme Right) */}
+            <div
+              className="floating-project-card"
+              onClick={() => window.open('https://locate-that-tchz.vercel.app', '_blank')}
+              style={{
+                position: 'absolute',
+                top: '28%',
+                right: '12%',
+                transform: 'translate(0, -50%) rotate(0deg) translate(var(--mouse-x, 0px), var(--mouse-y, 0px))',
+                width: '200px',
+                cursor: 'pointer',
+                zIndex: 10,
+                opacity: showWardrobePopup ? 1 : 0,
+                transition: 'all 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
+                '--mouse-x': '0px',
+                '--mouse-y': '0px',
+              } as React.CSSProperties}
+              onMouseOver={(e) => {
+                e.currentTarget.style.transform = 'scale(1.1) translate(var(--mouse-x, 0px), var(--mouse-y, 0px))';
+              }}
+              onMouseOut={(e) => {
+                e.currentTarget.style.transform = 'scale(1) translate(var(--mouse-x, 0px), var(--mouse-y, 0px))';
+              }}
+            >
+              <div style={{
+                borderRadius: '0',
+                overflow: 'hidden',
+                border: '4px solid #e89a3c',
+                boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+                background: '#e89a3c',
+                position: 'relative',
+              }}>
+                <img
+                  src="/locate_that.jpg"
+                  alt="LocateThat"
+                  style={{
+                    width: '100%',
+                    height: '200px',
+                    objectFit: 'cover',
+                    display: 'block',
+                  }}
+                />
+              </div>
+              <div className="click-to-view-text">
+                Click to view
+              </div>
+              <div className="project-text" style={{
+                left: 'auto',
+                right: '105%',
+                alignItems: 'flex-end',
+                textAlign: 'right'
+              }}>
+                <h3>LOCATE THAT</h3>
+                <p>
+                  Smart location tracking app integrating Google Maps with Gemini AI analysis.
+                </p>
+              </div>
+            </div>
+
+            {/* Project 4 - My Portfolio (Extreme Left) */}
+            <div
+              className="floating-project-card"
+              onClick={() => window.open('https://suvo-suvo.zocomputer.io/', '_blank')}
+              style={{
+                position: 'absolute',
+                top: 'auto',
+                bottom: '35%',
+                left: '5%',
+                transform: 'translate(0, 0) rotate(0deg) translate(var(--mouse-x, 0px), var(--mouse-y, 0px))',
+                width: '200px',
+                cursor: 'pointer',
+                zIndex: 10,
+                opacity: showWardrobePopup ? 1 : 0,
+                transition: 'all 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
+                '--mouse-x': '0px',
+                '--mouse-y': '0px',
+              } as React.CSSProperties}
+              onMouseOver={(e) => {
+                e.currentTarget.style.transform = 'scale(1.1) translate(var(--mouse-x, 0px), var(--mouse-y, 0px))';
+              }}
+              onMouseOut={(e) => {
+                e.currentTarget.style.transform = 'scale(1) translate(var(--mouse-x, 0px), var(--mouse-y, 0px))';
+              }}
+            >
+              <div style={{
+                borderRadius: '0',
+                overflow: 'hidden',
+                border: '4px solid #8b7355',
+                boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+                background: '#fef3c7',
+                position: 'relative',
+              }}>
+                <img
+                  src="/portfolio_cover.png"
+                  alt="My Portfolio"
+                  style={{
+                    width: '100%',
+                    height: '200px',
+                    objectFit: 'cover',
+                    display: 'block',
+                  }}
+                />
+              </div>
+              <div className="click-to-view-text">
+                Click to view
+              </div>
+              <div className="project-text">
+                <h3>MY PORTFOLIO</h3>
+                <p>
+                  Immersive 3D web experience built with Three.js and interactive storytelling.
+                </p>
+              </div>
+            </div>
+
+            {/* Project 3 - Suvo Store (Extreme Bottom) */}
+            <div
+              className="floating-project-card"
+              onClick={() => window.open('https://suvo-store.vercel.app', '_blank')}
+              style={{
+                position: 'absolute',
+                bottom: '15%',
+                left: '45%',
+                right: 'auto',
+                transform: 'translate(-50%, 0) rotate(0deg) translate(var(--mouse-x, 0px), var(--mouse-y, 0px))',
+                width: '200px',
+                cursor: 'pointer',
+                zIndex: 10,
+                opacity: showWardrobePopup ? 1 : 0,
+                transition: 'all 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
+                '--mouse-x': '0px',
+                '--mouse-y': '0px',
+              } as React.CSSProperties}
+              onMouseOver={(e) => {
+                e.currentTarget.style.zIndex = '50';
+              }}
+              onMouseOut={(e) => {
+                e.currentTarget.style.zIndex = '10';
+              }}
+            >
+              <div style={{
+                borderRadius: '0',
+                overflow: 'hidden',
+                border: '4px solid #8b7355',
+                boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+                background: '#fef3c7',
+                position: 'relative',
+              }}>
+                <img
+                  src="/suvo_store.png"
+                  alt="Suvo Store"
+                  style={{
+                    width: '100%',
+                    height: '200px',
+                    objectFit: 'cover',
+                    display: 'block',
+                  }}
+                />
+              </div>
+              <div className="click-to-view-text">
+                Click to view
+              </div>
+              <div className="project-text" style={{
+                left: 'auto',
+                right: '105%',
+                alignItems: 'flex-end',
+                textAlign: 'right'
+              }}>
+                <h3>SUVO STORE</h3>
+                <p>
+                  Full-stack e-commerce platform with secure payments and real-time inventory.
+                </p>
+              </div>
+            </div>
+
+            {/* Project 5 - AI Assistant (Bottom Left) */}
+            <div
+              className="floating-project-card"
+              onClick={() => window.open('https://suvo-44.vercel.app', '_blank')}
+              style={{
+                position: 'absolute',
+                bottom: '8%',
+                left: '15%',
+                transform: 'translate(-50%, 0) rotate(0deg) translate(var(--mouse-x, 0px), var(--mouse-y, 0px))',
+                width: '200px',
+                cursor: 'pointer',
+                zIndex: 10,
+                opacity: showWardrobePopup ? 1 : 0,
+                transition: 'all 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
+                '--mouse-x': '0px',
+                '--mouse-y': '0px',
+              } as React.CSSProperties}
+              onMouseOver={(e) => {
+                e.currentTarget.style.transform = 'scale(1.1) translate(var(--mouse-x, 0px), var(--mouse-y, 0px))';
+              }}
+              onMouseOut={(e) => {
+                e.currentTarget.style.transform = 'scale(1) translate(var(--mouse-x, 0px), var(--mouse-y, 0px))';
+              }}
+            >
+              <div style={{
+                borderRadius: '0',
+                overflow: 'hidden',
+                border: '4px solid #1a1a1a',
+                boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+                background: '#000',
+                position: 'relative',
+              }}>
+                <img
+                  src="/suvo_writer.png"
+                  alt="AI Assistant"
+                  style={{
+                    width: '100%',
+                    height: '200px',
+                    objectFit: 'cover',
+                    display: 'block',
+                  }}
+                />
+              </div>
+              <div className="click-to-view-text">
+                Click to view
+              </div>
+              <div className="project-text">
+                <h3>AI ASSISTANT</h3>
+                <p>
+                  A smart AI chat assistant capable of answering queries and organizing tasks.
+                </p>
+              </div>
+            </div>
+
+            {/* Project 6 - Hugo App (Top Right) */}
+            <div
+              className="floating-project-card"
+              onClick={() => window.open('https://github.com/Deadlybutsoft/hugo-app', '_blank')}
+              style={{
+                position: 'absolute',
+                top: '5%',
+                right: '28%',
+                transform: 'translate(50%, 0) rotate(0deg) translate(var(--mouse-x, 0px), var(--mouse-y, 0px))',
+                width: '200px',
+                cursor: 'pointer',
+                zIndex: 10,
+                opacity: showWardrobePopup ? 1 : 0,
+                transition: 'all 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
+                '--mouse-x': '0px',
+                '--mouse-y': '0px',
+              } as React.CSSProperties}
+              onMouseOver={(e) => {
+                e.currentTarget.style.transform = 'scale(1.1) translate(50%, 0) translate(var(--mouse-x, 0px), var(--mouse-y, 0px))';
+              }}
+              onMouseOut={(e) => {
+                e.currentTarget.style.transform = 'scale(1) translate(50%, 0) translate(var(--mouse-x, 0px), var(--mouse-y, 0px))';
+              }}
+            >
+              <div style={{
+                borderRadius: '0',
+                overflow: 'hidden',
+                border: '4px solid #ccfe01',
+                boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+                background: '#000',
+                position: 'relative',
+              }}>
+                <img
+                  src="/hugo_app.png"
+                  alt="Hugo App"
+                  style={{
+                    width: '100%',
+                    height: '200px',
+                    objectFit: 'cover',
+                    display: 'block',
+                  }}
+                />
+              </div>
+              <div className="click-to-view-text">
+                Click to view
+              </div>
+              <div className="project-text" style={{
+                left: 'auto',
+                right: '105%',
+                alignItems: 'flex-end',
+                textAlign: 'right'
+              }}>
+                <h3>HUGO APP</h3>
+                <p>
+                  A cutting-edge conversational IP registration platform with a focus on high-end frontend design and premium user experience.
+                </p>
+              </div>
+            </div>
+
+            {/* Project 7 - Touzi (Bottom Right) */}
+            <div
+              className="floating-project-card"
+              onClick={() => window.open('https://touzi-op.vercel.app', '_blank')}
+              style={{
+                position: 'absolute',
+                bottom: '25%',
+                right: '5%',
+                transform: 'translate(50%, 0) rotate(0deg) translate(var(--mouse-x, 0px), var(--mouse-y, 0px))',
+                width: '200px',
+                cursor: 'pointer',
+                zIndex: 10,
+                opacity: showWardrobePopup ? 1 : 0,
+                transition: 'all 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
+                '--mouse-x': '0px',
+                '--mouse-y': '0px',
+              } as React.CSSProperties}
+              onMouseOver={(e) => {
+                e.currentTarget.style.transform = 'scale(1.1) translate(50%, 0) translate(var(--mouse-x, 0px), var(--mouse-y, 0px))';
+              }}
+              onMouseOut={(e) => {
+                e.currentTarget.style.transform = 'scale(1) translate(50%, 0) translate(var(--mouse-x, 0px), var(--mouse-y, 0px))';
+              }}
+            >
+              <div style={{
+                borderRadius: '0',
+                overflow: 'hidden',
+                border: '4px solid #d946ef',
+                boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+                background: '#000',
+                position: 'relative',
+              }}>
+                <img
+                  src="/touzi.jpg"
+                  alt="Touzi"
+                  style={{
+                    width: '100%',
+                    height: '200px',
+                    objectFit: 'cover',
+                    display: 'block',
+                  }}
+                />
+              </div>
+              <div className="click-to-view-text">
+                Click to view
+              </div>
+              <div className="project-text" style={{
+                left: 'auto',
+                right: '105%',
+                alignItems: 'flex-end',
+                textAlign: 'right'
+              }}>
+                <h3>TOUZI</h3>
+                <p>
+                  A beautiful, secure, and transparent platform for hosting giveaway rooms.
+                </p>
+              </div>
+            </div>
+
+
+            {/* Center Typography - Bored Ape Style (Moved here for CSS sibling selection) */}
+            <div
+              className="center-typography"
+              style={{
+                position: 'absolute',
+                top: '50%',
+                left: '50%',
+                transform: 'translate(-50%, -50%) translate(var(--mouse-x, 0px), var(--mouse-y, 0px))',
+                textAlign: 'center',
+                zIndex: 2,
+                pointerEvents: 'none', // Allow clicks to pass through if needed, or keeping interactions
+                transition: 'all 0.5s cubic-bezier(0.16, 1, 0.3, 1)',
+                '--mouse-x': '0px',
+                '--mouse-y': '0px',
+              } as React.CSSProperties}
+            >
+              <h1 style={{
+                fontFamily: '"Gasoek One", sans-serif',
+                fontSize: 'clamp(3rem, 10vw, 8rem)',
+                fontWeight: '700',
+                color: '#f5f0e6',
+                lineHeight: '0.8',
+                letterSpacing: '-2px',
+                margin: 0,
+                opacity: showWardrobePopup ? 1 : 0,
+                transform: showWardrobePopup ? 'translateY(0)' : 'translateY(40px)',
+                transition: 'all 1.2s cubic-bezier(0.16, 1, 0.3, 1) 0.2s',
+              }}>
+                MY
+              </h1>
+              <h2 style={{
+                fontFamily: '"Gasoek One", sans-serif',
+                fontSize: 'clamp(3rem, 10vw, 8rem)',
+                fontWeight: '700',
+                color: '#f5f0e6',
+                lineHeight: '0.8',
+                letterSpacing: '-2px',
+                margin: '0',
+                textTransform: 'uppercase',
+                letterSpacing: '1px'
+              }}>
+                PROJECTS
+              </h2>
+            </div>
+          </div>
+        )}
+
+        {/* Bottom Navigation Hint */}
+        <div style={{
+          position: 'absolute',
+          bottom: '30px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          display: 'flex',
+          gap: '8px',
+          alignItems: 'center',
+          zIndex: 10,
+        }}>
+          <span style={{
+            fontFamily: '"Bricolage Grotesque", sans-serif',
+            fontSize: '0.7rem',
+            color: 'rgba(245, 240, 230, 0.4)',
+            textTransform: 'uppercase',
+            letterSpacing: '0.2em',
+          }}>
+            Click to explore
+          </span>
+        </div>
+      </div>
+
+      {/* SKILLS POPUP - Paper Carousel Design */}
+      <div style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        width: '100vw',
+        height: '100vh',
+        zIndex: 99998,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'rgba(5, 5, 5, 0.85)',
+        backdropFilter: 'blur(30px)',
+        opacity: showSkillsPopup ? 1 : 0,
+        pointerEvents: showSkillsPopup ? 'auto' : 'none',
+        transition: 'all 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
+        overflow: 'hidden',
+      }}>
+        <div style={{
+          width: '100vw',
+          height: '100vh',
+          backgroundImage: 'url(/project_bg.png)',
+          backgroundSize: 'cover',
+          backgroundPosition: 'center',
+          backgroundRepeat: 'no-repeat',
+          position: 'relative',
+          transform: showSkillsPopup ? 'scale(1) rotate(0deg)' : 'scale(0.9) rotate(-2deg)',
+          opacity: showSkillsPopup ? 1 : 0,
+          filter: showSkillsPopup ? 'blur(0px)' : 'blur(10px)',
+          transition: 'all 0.8s cubic-bezier(0.16, 1, 0.3, 1)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '40px',
+          color: '#2a1b12',
+        }}>
+          {/* Animated Background Glows */}
+          <div style={{
+            position: 'absolute',
+            top: '20%',
+            left: '20%',
+            width: '400px',
+            height: '400px',
+            background: 'rgba(139, 69, 19, 0.05)',
+            filter: 'blur(100px)',
+            borderRadius: '50%',
+            animation: 'pulse-glow 10s ease-in-out infinite alternate'
+          }} />
+          <div style={{
+            position: 'absolute',
+            bottom: '20%',
+            right: '20%',
+            width: '400px',
+            height: '400px',
+            background: 'rgba(42, 27, 18, 0.05)',
+            filter: 'blur(100px)',
+            borderRadius: '50%',
+            animation: 'pulse-glow 12s ease-in-out infinite alternate-reverse'
+          }} />
+          {/* Close Button - Hand Drawn Style */}
+          <div
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowSkillsPopup(false);
+              sfx.playClose();
+            }}
+            className="hand-drawn-close-btn"
+            style={{
+              position: 'absolute',
+              top: '40px',
+              right: '60px',
+              width: '80px',
+              height: '80px',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              cursor: 'pointer',
+              zIndex: 10
+            }}
+          >
+            <svg width="80" height="80" viewBox="0 0 100 100">
+              <path
+                d="M50 15c12-1 28 5 33 22 5 17-6 36-23 40-17 4-37-10-38-28-1-18 11-32 28-34"
+                fill="none"
+                stroke="#f6f1e6"
+                strokeWidth="3.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity="1"
+              />
+              <path
+                className="cross-line line-1"
+                d="M35 37c8 6 22 19 30 26"
+                fill="none"
+                stroke="#f6f1e6"
+                strokeWidth="3.5"
+                strokeLinecap="round"
+                opacity="0.8"
+                style={{ transformOrigin: 'center', transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)' }}
+              />
+              <path
+                className="cross-line line-2"
+                d="M65 37c-7 8-23 20-30 26"
+                fill="none"
+                stroke="#f6f1e6"
+                strokeWidth="3.5"
+                strokeLinecap="round"
+                opacity="0.8"
+                style={{ transformOrigin: 'center', transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)' }}
+              />
+            </svg>
+          </div>
+
+          {/* Main Content Container */}
+          <div style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: '100%',
+            height: '100%',
+            zIndex: 5,
+          }}>
+
+            {/* Title Section */}
+            <div style={{
+              textAlign: 'center',
+              marginBottom: '30px',
+              position: 'relative'
+            }}>
+              <div style={{ position: 'relative', display: 'inline-block' }}>
+                <h1 style={{
+                  margin: 0,
+                  fontSize: '6rem',
+                  fontFamily: '"Instrument Serif", serif',
+                  fontWeight: '400',
+                  color: '#f6f0e6',
+                  lineHeight: '1.1',
+                  letterSpacing: '-2px',
+                  opacity: showSkillsPopup ? 1 : 0,
+                  transform: showSkillsPopup ? 'translateY(0)' : 'translateY(30px)',
+                  transition: 'all 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.2s',
+                  whiteSpace: 'nowrap'
+                }}>
+                  My Skills
+                </h1>
+
+                {/* Refined Hand-drawn Underline specifically under 'Suvo' */}
+                <svg
+                  style={{ position: 'absolute', bottom: '-10px', left: '55%', width: '45%', height: '30px' }}
+                  viewBox="0 0 150 30"
+                >
+                  {/* First Stroke */}
+                  <path
+                    d="M10 15c20-2 80-5 130 2"
+                    fill="none"
+                    stroke="#8b4513"
+                    strokeWidth="3.5"
+                    strokeLinecap="round"
+                    style={{
+                      strokeDasharray: 200,
+                      strokeDashoffset: showSkillsPopup ? 0 : 200,
+                      transition: 'stroke-dashoffset 1s ease 1.2s'
+                    }}
+                  />
+                  {/* Second Scribble Stroke */}
+                  <path
+                    d="M15 22c30 1 70-2 120-1"
+                    fill="none"
+                    stroke="#8b4513"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    opacity="0.5"
+                    style={{
+                      strokeDasharray: 200,
+                      strokeDashoffset: showSkillsPopup ? 0 : 200,
+                      transition: 'stroke-dashoffset 1s ease 1.4s'
+                    }}
+                  />
+                </svg>
+              </div>
+
+              {/* Profile Image - Sticker Mode */}
+              <div style={{
+                position: 'relative',
+                width: '150px',
+                height: '150px',
+                flexShrink: 0,
+                transform: showSkillsPopup ? 'rotate(-2deg) scale(1)' : 'rotate(-10deg) scale(0.8)',
+                opacity: showSkillsPopup ? 1 : 0,
+                transition: 'all 0.8s cubic-bezier(0.34, 1.56, 0.64, 1) 1s',
+              }}>
+                {/* Decorative Background Shadow/Border */}
+                <div style={{
+                  position: 'absolute',
+                  top: '8px',
+                  left: '8px',
+                  width: '100%',
+                  height: '100%',
+                  backgroundColor: 'rgba(42, 27, 18, 0.08)',
+                  borderRadius: '24px',
+                  zIndex: 0
+                }} />
+
+                {/* Outer Brown Border */}
+                <div style={{
+                  position: 'absolute',
+                  top: '4px',
+                  left: '4px',
+                  width: '100%',
+                  height: '100%',
+                  border: '2.5px solid #8b4513',
+                  borderRadius: '24px',
+                  zIndex: 1
+                }} />
+
+                {/* Main Sticker Container (White Cut-out) */}
+                <div style={{
+                  position: 'relative',
+                  width: '100%',
+                  height: '100%',
+                  backgroundColor: '#ffffff',
+                  padding: '7px',
+                  borderRadius: '24px',
+                  border: '2.5px solid #2a1b12',
+                  zIndex: 2,
+                  boxShadow: '0 8px 30px rgba(0,0,0,0.12)'
+                }}>
+                  {/* Image with rounded corners matching the sticker */}
+                  <div style={{
+                    width: '100%',
+                    height: '100%',
+                    borderRadius: '17px',
+                    overflow: 'hidden',
+                  }}>
+                    <img
+                      src="/profile_new.jpg"
+                      alt="Suvo"
+                      style={{
+                        width: '100%',
+                        height: '100%',
+                        objectFit: 'cover'
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div style={{
+              marginTop: '40px',
+              fontFamily: '"Bricolage Grotesque", sans-serif',
+              fontSize: '1.4rem',
+              lineHeight: '1.6',
+              color: '#3e2723',
+              fontWeight: '400',
+              padding: '0 60px',
+              maxWidth: '850px',
+              letterSpacing: '0.01em',
+              opacity: showSkillsPopup ? 1 : 0,
+              transform: showSkillsPopup ? 'translateY(0)' : 'translateY(20px)',
+              transition: 'all 0.8s ease 1.1s',
+              textAlign: 'center'
+            }}>
+              A <strong style={{ color: '#8b4513', fontWeight: '600' }}>full-stack web developer</strong> focused on building scalable, efficient, and user-centric web applications. I work across both frontend and backend, translating product requirements into reliable, production-ready solutions.
+            </div>
+
+          </div>
+
+          {/* Down Arrow Indicator */}
+          <div style={{
+            position: 'absolute',
+            bottom: '50px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            opacity: showSkillsPopup ? 0.7 : 0,
+            transition: 'opacity 0.8s ease 1.5s',
+            zIndex: 20
+          }} className="animate-bounce">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#2a1b12" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 5v14M19 12l-7 7-7-7" />
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Gasoek+One&family=Bricolage+Grotesque:wght@200..800&family=Instrument+Serif:ital,wght@0,400;1,400&display=swap');
+
+        @keyframes pulse {
+          0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.7); }
+          50% { transform: scale(1.05); box-shadow: 0 0 0 10px rgba(255, 255, 255, 0); }
+          100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
+        }
+
+        @keyframes revealText {
+          from { opacity: 0; transform: translateY(20px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes remotePop {
+          0% { opacity: 0; transform: translateY(100px) scale(0.5); }
+          100% { opacity: 1; transform: translateY(0) scale(1); }
+        }
+
+        @keyframes pulse-glow {
+          from { transform: scale(1) translate(0, 0); opacity: 0.1; }
+          to { transform: scale(1.2) translate(20px, 20px); opacity: 0.2; }
+        }
+
+        .floating-icon {
+          transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+          z-index: 10;
+        }
+        .floating-icon:hover {
+          transform: translateY(-15px) scale(1.1) !important;
+          z-index: 20;
+        }
+        .floating-icon:hover div {
+           box-shadow: 0 30px 60px rgba(255, 255, 255, 0.1) !important;
+           border-color: rgba(255, 255, 255, 0.5) !important;
+        }
+
+        .skill-card {
+          cursor: pointer;
+          transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .skill-card:hover {
+          transform: translateY(-10px) scale(1.05);
+        }
+        .skill-card:hover div:first-child {
+           box-shadow: 0 20px 40px rgba(42, 27, 18, 0.15) !important;
+           border-color: #8b4513 !important;
+        }
+
+        .project-card {
+           transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .project-card:hover {
+          transform: translateY(-8px);
+          box-shadow: 0 12px 40px rgba(42, 27, 18, 0.15) !important;
+        }
+
+        /* Floating Project Card Text Reveal */
+        .project-text {
+          font-family: "Instrument Serif", serif;
+          font-size: 3rem;
+          color: rgba(255, 255, 255, 0.7);
+          text-transform: uppercase;
+          letter-spacing: 0.15em;
+          text-align: center;
+          padding: 12px 0;
+          opacity: 0;
+          transform: translateY(-10px);
+          transition: all 0.3s cubic-bezier(0.19, 1, 0.22, 1);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+        }
+
+        .project-text h3 {
+          font-family: "Instrument Serif", serif !important;
+          font-size: 3rem !important;
+          font-weight: 600 !important;
+          font-style: normal !important;
+          color: #f5f0e6 !important;
+          margin: 0 0 12px 0 !important;
+          letter-spacing: -1px !important;
+          line-height: 0.9 !important;
+          text-shadow: 0 0 30px rgba(0, 0, 0, 0.6);
+        }
+
+        .project-text p {
+          font-family: "Bricolage Grotesque", sans-serif !important;
+          font-size: 0.85rem !important;
+          color: rgba(255, 255, 255, 0.6) !important;
+          margin: 0 !important;
+          line-height: 1.5 !important;
+          font-weight: 400 !important;
+          text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+          max-width: 220px;
+        }
+
+        .floating-project-card:hover .project-text {
+          opacity: 1;
+          transform: translateY(0);
+          pointer-events: auto;
+        }
+
+        /* Click to View Text - Below Project Image */
+        .click-to-view-text {
+          font-family: "Bricolage Grotesque", sans-serif;
+          font-size: 0.75rem;
+          color: rgba(255, 255, 255, 0.7);
+          text-transform: uppercase;
+          letter-spacing: 0.15em;
+          text-align: center;
+          padding: 12px 0;
+          opacity: 0;
+          transform: translateY(-10px);
+          transition: all 0.3s cubic-bezier(0.19, 1, 0.22, 1);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+        }
+
+        .floating-project-card:hover .click-to-view-text {
+          opacity: 1;
+          transform: translateY(0);
+        }
+
+        /* Dimming Effect on Peer Hover */
+        .floating-cards-container:hover .floating-project-card {
+          opacity: 0.3 !important;
+          filter: grayscale(100%);
+          transform: scale(0.95);
+        }
+
+        .floating-cards-container .floating-project-card:hover {
+          opacity: 1 !important;
+          filter: grayscale(0%);
+          z-index: 100;
+        }
+
+        /* Watermark Typography on Card Hover */
+        .floating-cards-container:has(.floating-project-card:hover) .center-typography {
+          opacity: 0.1 !important;
+          transform: translate(-50%, -50%) scale(0.95) !important;
+          filter: blur(0px);
+        }
+
+        /* GitHub Tooltip Effect Styles */
+        :root {
+          --bar-scale-y: 0;
+          --sparkle-color: rgb(253 244 215 / 40%);
+        }
+
+        @keyframes pop-word {
+          to { transform: rotateX(0); }
+        }
+
+        @keyframes show {
+          to { opacity: 1; }
+        }
+
+        @keyframes bar-scale {
+          to { transform: scaleY(1); }
+        }
+
+        @keyframes sparkle {
+          0% { transform: scale(0); }
+          60% { transform: scale(1) translate(4px, 1px) rotate(8deg); }
+          100% { transform: scale(0) translate(4px, 1px) rotate(8deg); }
+        }
+
+        @keyframes shimmer {
+          to { text-shadow: 0 0 8px rgba(239, 68, 68, 0.8); }
+        }
+
+        .github-tooltip h1 {
+          color: white;
+          font-family: "Gasoek One", sans-serif;
+          font-size: 3.2rem;
+          line-height: 1.2;
+          perspective: 1000px;
+          margin: 0;
+          white-space: nowrap;
+          pointer-events: none;
+          display: flex;
+          align-items: center;
+          width: 600px; /* Increased width for capital letters */
+          justify-content: center;
+          text-transform: uppercase;
+          letter-spacing: 2px;
+        }
+
+        .github-tooltip .word {
+          display: inline-block;
+          animation: show 1s forwards, pop-word 0.8s forwards;
+          animation-timing-function: cubic-bezier(0.14, 1.23, 0.33, 1.16);
+          opacity: 0;
+          transform: rotateX(85deg);
+          transform-origin: 50% 100%;
+        }
+
+        .github-tooltip .word:not(.superscript) {
+          animation-delay: 0s;
+        }
+
+        .github-tooltip .superscript {
+          margin-left: 1.2rem;
+          animation-delay: 0.1s;
+          color: #ffffff; /* Changed from Gold to White */
+          position: relative;
+          display: inline-block;
+        }
+
+        /* bars removed per user request */
+
+        .github-tooltip.no-bars .superscript::before {
+          display: none;
+        }
+
+        /* sparkle */
+        .github-tooltip .superscript::after {
+          --size: 3rem;
+          position: absolute;
+          top: -20%;
+          left: -40%;
+          width: var(--size);
+          height: var(--size);
+          animation: sparkle 0.4s linear 1.4s 1 forwards;
+          background: radial-gradient(
+              circle at center,
+              rgb(252 249 241 / 94%) 0% 7%,
+              transparent 7% 100%
+            ),
+            conic-gradient(
+              transparent 0deg 18deg,
+              var(--sparkle-color) 18deg,
+              transparent 20deg 40deg,
+              var(--sparkle-color) 40deg,
+              transparent 43deg 87deg,
+              var(--sparkle-color) 87deg,
+              transparent 95deg 175deg,
+              var(--sparkle-color) 175deg,
+              transparent 178deg 220deg,
+              var(--sparkle-color) 220deg,
+              transparent 222deg 270deg,
+              var(--sparkle-color) 270deg,
+              transparent 275deg 300deg,
+              var(--sparkle-color) 300deg,
+              transparent 303deg 360deg
+            );
+          border-radius: 50%;
+          clip-path: polygon(
+            50% 0,
+            59.13% 26.64%,
+            85.13% -2.35%,
+            100% 50%,
+            50% 100%,
+            0 50%,
+            31.39% 34.86%
+          );
+          content: "";
+          filter: blur(1px);
+          transform: scale(0);
+          position: absolute;
+          top: -20%;
+          left: -40%;
+          width: var(--size);
+          height: var(--size);
+        }
+
+        .hand-drawn-close-btn:hover .line-1,
+        .hand-drawn-close-btn:hover .line-2 {
+          transform: rotate(90deg);
+        }
+
+        @keyframes float {
+          0%, 100% { transform: translateY(0px); }
+          50% { transform: translateY(-20px); }
+        }
+
+        /* Paper Carousel Animations */
+        .paper-skill-item:hover {
+          transform: translateY(-5px) !important;
+          box-shadow: 0 10px 20px rgba(139, 69, 19, 0.15) !important;
+          background: rgba(255, 255, 255, 0.95) !important;
+          border-color: rgba(139, 69, 19, 0.4) !important;
+        }
+
+        /* Dot Animations */
+        /* Removed automatic carousel keyframes */
+      `}</style>
+    </div >
+  );
+};

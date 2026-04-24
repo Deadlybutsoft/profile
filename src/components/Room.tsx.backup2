@@ -1,0 +1,1898 @@
+import '@/lib/types';
+import React, { useMemo, useRef } from 'react';
+import * as THREE from 'three';
+import { useFrame } from '@react-three/fiber';
+import { Text, useTexture, RoundedBox, Billboard, Html, Edges, useCursor, useFBX, CubicBezierLine, Line } from '@react-three/drei';
+import { useThree } from '@react-three/fiber';
+import { sfx } from '@/lib/sfx';
+import { smartDownload } from '@/lib/download';
+
+const noop = () => {};
+
+interface AnimatedSwitchButtonProps {
+   onClick?: (e: any) => void;
+   label?: string;
+   onHoverChange?: (hovered: boolean) => void;
+   disabled?: boolean;
+   emphasis?: boolean;
+}
+
+const AnimatedSwitchButton: React.FC<AnimatedSwitchButtonProps> = ({ onClick, label, onHoverChange, disabled, emphasis = false }) => {
+   const dotRef = useRef<THREE.Group>(null);
+   const rippleRef = useRef<THREE.Mesh>(null);
+   const [hovered, setHovered] = React.useState(false);
+
+   useFrame((state) => {
+      if (disabled) return;
+      const t = state.clock.getElapsedTime();
+
+      // Floating effect for the dot
+      if (dotRef.current) {
+         dotRef.current.position.z = 0.06 + Math.sin(t * 3) * 0.03;
+         // Pulse size when hovered
+         const scale = hovered ? 1.2 + Math.sin(t * 5) * 0.1 : 1;
+         dotRef.current.scale.set(scale, scale, scale);
+      }
+
+      // Ripple effect
+      if (rippleRef.current) {
+         const s = (t * 0.8) % 1;
+         rippleRef.current.scale.set(1 + s * 4, 1 + s * 4, 1);
+         (rippleRef.current.material as THREE.MeshBasicMaterial).opacity = (1 - s) * (hovered ? 1 : 0.8);
+      }
+   });
+
+   React.useEffect(() => {
+      onHoverChange?.(hovered);
+      if (hovered) {
+         document.body.style.cursor = 'pointer';
+         sfx.playHover();
+      } else {
+         document.body.style.cursor = 'auto';
+      }
+      return () => { document.body.style.cursor = 'auto'; };
+   }, [hovered]);
+
+   return (
+      <group
+         position={[0, 0, 0]}
+         onClick={(e) => {
+            if (disabled) return;
+            e.stopPropagation();
+            sfx.playClick();
+            onClick?.(e);
+         }}
+         onPointerOver={() => !disabled && setHovered(true)}
+         onPointerOut={() => setHovered(false)}
+      >
+         {/* Invisible Hit Area - Makes the entire circle interactive */}
+         <mesh>
+               <circleGeometry args={[emphasis ? 0.38 : 0.3, 32]} />
+            <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+         </mesh>
+
+         {/* Floating Dot */}
+         <group ref={dotRef}>
+            <mesh>
+               <sphereGeometry args={[emphasis ? 0.052 : 0.04, 32, 32]} />
+               <meshBasicMaterial color={hovered ? "#ffffff" : (emphasis ? "#f8ffff" : "#ffffff")} toneMapped={false} />
+            </mesh>
+         </group>
+
+         {/* Ripple Wave */}
+         <Billboard position={[0, 0, 0.08]}>
+            <mesh ref={rippleRef}>
+               <ringGeometry args={emphasis ? [0.06, 0.072, 32] : [0.047, 0.053, 32]} />
+               <meshBasicMaterial
+                  color={hovered ? "#ffffff" : (emphasis ? "#eaffff" : "#ffffff")}
+                  transparent
+                  opacity={emphasis ? 1 : 0.9}
+                  toneMapped={false}
+                  depthWrite={false}
+                  side={THREE.DoubleSide}
+                  polygonOffset
+                  polygonOffsetFactor={-1}
+               />
+            </mesh>
+         </Billboard>
+
+         {/* Hover Tooltip Label */}
+         {hovered && label && (
+            <Html position={[0, 0.4, 0]} center distanceFactor={6}>
+               <div className="github-tooltip no-bars">
+                  <h1>
+                     <span className="word">{label.split(' ')[0]}</span>
+                     {label.split(' ')[1] && <span className="word superscript">{label.split(' ')[1]}</span>}
+                  </h1>
+               </div>
+            </Html>
+         )}
+      </group>
+   );
+};
+
+interface RoomProps {
+   lightsOn: boolean;
+   lightColor: string;
+   lightIntensity: number;
+   hexagonLightsOn: boolean;
+   fanSpeed: number;
+   roomMode: 'normal' | 'night' | 'party';
+   showRemote: boolean;
+   isDoorOpen: boolean;
+   onToggleRemote: () => void;
+   onToggleWardrobe: () => void;
+   onToggleSkills: () => void;
+   onToggleAI: () => void;
+   isPopupOpen: boolean;
+}
+
+const Bulb: React.FC<{ position: THREE.Vector3, color: string, index: number }> = ({ position, color, index }) => {
+   const meshRef = useRef<THREE.Mesh>(null);
+   useFrame(({ clock }) => {
+      if (meshRef.current) {
+         const t = clock.getElapsedTime();
+         // Twinkle effect
+         const intensity = 1.0 + Math.sin(t * 3 + index * 1337) * 0.5;
+         (meshRef.current.material as THREE.MeshStandardMaterial).emissiveIntensity = intensity;
+      }
+   });
+
+   return (
+      <mesh ref={meshRef} position={position}>
+         <sphereGeometry args={[0.015, 8, 8]} />
+         <meshStandardMaterial color={color} emissive={color} emissiveIntensity={1} toneMapped={false} />
+      </mesh>
+   );
+};
+
+const FairyLightStrand: React.FC<{ start: [number, number, number], mid: [number, number, number], end: [number, number, number] }> = ({ start, mid, end }) => {
+   const colors = ['#ff0044', '#00ff44', '#3300ff', '#ffaa00', '#00ffff'];
+   const curve = useMemo(() => {
+      const c = new THREE.CatmullRomCurve3([
+         new THREE.Vector3(...start),
+         new THREE.Vector3(...mid),
+         new THREE.Vector3(...end)
+      ]);
+      return c;
+   }, [start, mid, end]);
+
+   const points = useMemo(() => curve.getPoints(50), [curve]);
+   const bulbPoints = useMemo(() => curve.getSpacedPoints(25), [curve]);
+
+   return (
+      <group>
+         <Line points={points} color="#111" lineWidth={1} />
+         {bulbPoints.map((pt, i) => (
+            <Bulb key={i} position={pt} color={colors[i % colors.length]} index={i} />
+         ))}
+      </group>
+   );
+};
+
+export const Room: React.FC<RoomProps> = ({
+   lightsOn,
+   lightColor,
+   lightIntensity,
+   hexagonLightsOn,
+   fanSpeed,
+   roomMode,
+   showRemote,
+   isDoorOpen,
+   onToggleRemote = noop,
+   onToggleWardrobe = noop,
+   onToggleSkills = noop,
+   onToggleAI = noop,
+   isPopupOpen
+}) => {
+   const { camera } = useThree();
+   const [monitorOn, setMonitorOn] = React.useState(true);
+   const [tvOn, setTvOn] = React.useState(true);
+
+   const fanRef = React.useRef<THREE.Group>(null);
+   const currentFanRotationSpeed = React.useRef(0);
+   const [partyColor, setPartyColor] = React.useState('#ff0000');
+   const [inHallway, setInHallway] = React.useState(true);
+
+   // Load Speaker Model
+   const speakerFBX = useFBX('/big speaker.fbx');
+   const speakerModel = useMemo(() => {
+      const clone = speakerFBX.clone();
+      clone.traverse((child) => {
+         if ((child as THREE.Mesh).isMesh) {
+            child.castShadow = true;
+            child.receiveShadow = true;
+         }
+      });
+      return clone;
+   }, [speakerFBX]);
+
+
+   const [posterHovered, setPosterHovered] = React.useState(false);
+   const [monitorHovered, setMonitorHovered] = React.useState(false);
+   const [switchboardHovered, setSwitchboardHovered] = React.useState(false);
+
+   const [shelfHovered, setShelfHovered] = React.useState(false);
+   const [linkedinHovered, setLinkedinHovered] = React.useState(false);
+   const [xHovered, setXHovered] = React.useState(false);
+   const [githubHovered, setGithubHovered] = React.useState(false);
+   const [mailHovered, setMailHovered] = React.useState(false);
+   const [cvHovered, setCvHovered] = React.useState(false);
+   const [contraHovered, setContraHovered] = React.useState(false);
+   const [wardrobeHovered, setWardrobeHovered] = React.useState(false);
+
+   useFrame((state, delta) => {
+      const t = state.clock.getElapsedTime();
+
+      // Fan Logic
+      if (fanRef.current) {
+         const targetSpeed = fanSpeed * 2.5;
+         currentFanRotationSpeed.current += (targetSpeed - currentFanRotationSpeed.current) * delta;
+         fanRef.current.rotation.y += currentFanRotationSpeed.current * delta;
+      }
+
+      // Rainbow color cycle
+      if (roomMode === 'party') {
+         const h = (t * 0.5) % 1;
+         const color = new THREE.Color().setHSL(h, 0.8, 0.5);
+         setPartyColor('#' + color.getHexString());
+      }
+
+      // Update hallway visibility check
+      const currentInHallway = camera.position.z > -4.1;
+      if (currentInHallway !== inHallway) {
+         setInHallway(currentInHallway);
+      }
+   });
+
+   const currentLightColor = roomMode === 'party' ? partyColor : lightColor;
+   const currentIntensity = roomMode === 'night' ? 0.1 : (roomMode === 'party' ? 6.0 : lightIntensity);
+
+   const roomWidth = 8;
+   const roomDepth = 6;
+   const roomHeight = 3.2;
+   const zOffset = -4 - (roomDepth / 2); // Center of the room (-8) -> Adjusted for depth
+
+   // Laser refs for animation
+   const laser1Ref = useRef<THREE.Group>(null);
+   const laser2Ref = useRef<THREE.Group>(null);
+   const laser3Ref = useRef<THREE.Group>(null);
+   const laser4Ref = useRef<THREE.Group>(null);
+   const laser5Ref = useRef<THREE.Group>(null);
+
+   // Animate lasers in party mode
+   useFrame((state) => {
+      if (roomMode !== 'party') return;
+      const t = state.clock.getElapsedTime();
+
+      // Sweeping motion for each laser with different speeds and phases
+      if (laser1Ref.current) {
+         laser1Ref.current.rotation.x = Math.sin(t * 0.7) * 0.6;
+         laser1Ref.current.rotation.z = Math.cos(t * 0.5) * 0.4;
+      }
+      if (laser2Ref.current) {
+         laser2Ref.current.rotation.x = Math.sin(t * 0.9 + 1) * 0.5;
+         laser2Ref.current.rotation.z = Math.cos(t * 0.6 + 1) * 0.5;
+      }
+      if (laser3Ref.current) {
+         laser3Ref.current.rotation.x = Math.sin(t * 0.8 + 2) * 0.7;
+         laser3Ref.current.rotation.z = Math.cos(t * 0.4 + 2) * 0.3;
+      }
+      if (laser4Ref.current) {
+         laser4Ref.current.rotation.x = Math.sin(t * 0.6 + 3) * 0.4;
+         laser4Ref.current.rotation.z = Math.cos(t * 0.7 + 3) * 0.6;
+      }
+      if (laser5Ref.current) {
+         laser5Ref.current.rotation.x = Math.sin(t * 1.1 + 4) * 0.5;
+         laser5Ref.current.rotation.z = Math.cos(t * 0.8 + 4) * 0.4;
+      }
+   });
+
+   // Load textures
+   const carpetTexture = useTexture('/final_carpet.jpg');
+   // Set to 1,1 because we are now using 4 separate meshes for the 4 parts
+   carpetTexture.repeat.set(1, 1);
+
+   const wallTexture = useTexture('/grey_wall.jpg');
+   wallTexture.repeat.set(1, 1);
+
+   const ceilingTexture = useTexture('/ceiling_texture.jpg');
+   ceilingTexture.repeat.set(1, 1);
+
+   const windowTexture = useTexture('/window_view_new.png');
+   windowTexture.anisotropy = 16;
+   windowTexture.wrapS = windowTexture.wrapT = THREE.RepeatWrapping;
+   windowTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const deskTexture = useTexture('/desk_wood.jpg');
+   deskTexture.anisotropy = 16;
+   deskTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const drawerTexture = useTexture('/drawer_texture.jpg');
+   drawerTexture.anisotropy = 16;
+   drawerTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const cabinetTexture = useTexture('/cabinet_wood.jpg');
+   cabinetTexture.anisotropy = 16;
+   cabinetTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const bedTexture = useTexture('/bed_texture_vibe.jpg');
+   bedTexture.anisotropy = 16;
+   bedTexture.wrapS = bedTexture.wrapT = THREE.RepeatWrapping;
+   bedTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const bedBaseTexture = useTexture('/bed_base_wood.jpg');
+   bedBaseTexture.anisotropy = 16;
+   bedBaseTexture.wrapS = bedBaseTexture.wrapT = THREE.RepeatWrapping;
+   bedBaseTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const wardrobeTexture = useTexture('/wardrobe_texture.jpg');
+   wardrobeTexture.anisotropy = 16;
+   wardrobeTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const shelfVerticalTexture = useTexture('/shelf_vertical_wood.jpg');
+   shelfVerticalTexture.anisotropy = 16;
+   shelfVerticalTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const pillowTexture = useTexture('/pillow_texture.jpg');
+   pillowTexture.anisotropy = 16;
+   pillowTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const shelfSlabTexture = useTexture('/shelf_slab_wood.jpg');
+   shelfSlabTexture.anisotropy = 16;
+   shelfSlabTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const chairTexture = useTexture('/chair_fabric.jpg');
+   chairTexture.anisotropy = 16;
+   chairTexture.colorSpace = THREE.SRGBColorSpace;
+   chairTexture.wrapS = chairTexture.wrapT = THREE.RepeatWrapping;
+
+   const keyboardTexture = useTexture('/custom_keyboard.jpg');
+   keyboardTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const deskMatTexture = useTexture('/desk_mat_design.jpg');
+   deskMatTexture.colorSpace = THREE.SRGBColorSpace;
+   deskMatTexture.anisotropy = 16;
+
+   const switchboardTexture = useTexture('/switchboard.png');
+   switchboardTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const contributionTexture = useTexture('/contribution_graph_new.png');
+   contributionTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const githubLogoTexture = useTexture('/github_logo.png');
+   githubLogoTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const downloadIconTexture = useTexture('/download_icon.png');
+   downloadIconTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const mailIconTexture = useTexture('/mail_icon.png');
+   mailIconTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const monitorTexture = useTexture('/mac_screen.png');
+   monitorTexture.colorSpace = THREE.SRGBColorSpace;
+   monitorTexture.anisotropy = 16;
+
+   const quoteTexture = useTexture('/motivational_quote_v2.png');
+   quoteTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const appleLogoTexture = useTexture('/apple_logo.png');
+   appleLogoTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const contraLogoTexture = useTexture('/contra_logo.png');
+   contraLogoTexture.colorSpace = THREE.SRGBColorSpace;
+
+
+   const skillsBgTexture = useTexture('/skills_bg_new.png');
+   skillsBgTexture.anisotropy = 16;
+   skillsBgTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const skillsBgBlackTexture = useTexture('/skills_bg_black.png');
+   skillsBgBlackTexture.anisotropy = 16;
+   skillsBgBlackTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const skillsBgNewTexture = useTexture('/skills_bg_new.png');
+   skillsBgNewTexture.anisotropy = 16;
+   skillsBgNewTexture.colorSpace = THREE.SRGBColorSpace;
+
+   const skillsBgGrainyTexture = useTexture('/skills_bg_grainy.jpg');
+   skillsBgGrainyTexture.anisotropy = 16;
+   skillsBgGrainyTexture.colorSpace = THREE.SRGBColorSpace;
+
+
+   // Doorway Logic (Front Wall) - Keeping existing door position
+   const frontDoorWidth = 1.2;
+   const frontDoorHeight = 3.2;
+   const frontDoorPosX = -3.3;
+   const fHoleLeft = frontDoorPosX - frontDoorWidth / 2;
+   const fHoleRight = frontDoorPosX + frontDoorWidth / 2;
+
+   // Generate Blinds for Window
+   const blinds = useMemo(() => {
+      return Array.from({ length: 12 }).map((_, i) => (
+         <mesh key={i} position={[0, 1.0 - i * 0.18, 0.05]} castShadow receiveShadow>
+            <boxGeometry args={[2.8, 0.14, 0.02]} />
+            <meshStandardMaterial color="#f0f0f0" />
+         </mesh>
+      ));
+   }, []);
+
+   return (
+      <group position={[0, 0, zOffset]}>
+         {/* --- STRUCTURE --- */}
+
+         {/* Diamond Pattern Plush Carpet Floor - 4 Parts */}
+         <group rotation={[-Math.PI / 2, 0, 0]}>
+            {/* Top Left */}
+            <mesh position={[-roomWidth / 4, roomDepth / 4, 0]} receiveShadow>
+               <planeGeometry args={[roomWidth / 2, roomDepth / 2]} />
+               <meshStandardMaterial map={carpetTexture} roughness={1} metalness={0} />
+            </mesh>
+            {/* Top Right */}
+            <mesh position={[roomWidth / 4, roomDepth / 4, 0]} receiveShadow>
+               <planeGeometry args={[roomWidth / 2, roomDepth / 2]} />
+               <meshStandardMaterial map={carpetTexture} roughness={1} metalness={0} />
+            </mesh>
+            {/* Bottom Left */}
+            <mesh position={[-roomWidth / 4, -roomDepth / 4, 0]} receiveShadow>
+               <planeGeometry args={[roomWidth / 2, roomDepth / 2]} />
+               <meshStandardMaterial map={carpetTexture} roughness={1} metalness={0} />
+            </mesh>
+            {/* Bottom Right */}
+            <mesh position={[roomWidth / 4, -roomDepth / 4, 0]} receiveShadow>
+               <planeGeometry args={[roomWidth / 2, roomDepth / 2]} />
+               <meshStandardMaterial map={carpetTexture} roughness={1} metalness={0} />
+            </mesh>
+         </group>
+
+         {/* Ceiling */}
+         <mesh rotation={[Math.PI / 2, 0, 0]} position={[0, roomHeight, 0]}>
+            <planeGeometry args={[roomWidth, roomDepth]} />
+            <meshStandardMaterial map={ceilingTexture} roughness={1} />
+         </mesh>
+
+         {/* Ceiling Corner Trim / Crown Molding (No Glow) */}
+         <group position={[0, roomHeight - 0.05, 0]}>
+            {/* Back Strip */}
+            <mesh position={[0, 0, -roomDepth / 2 + 0.05]}>
+               <boxGeometry args={[roomWidth, 0.1, 0.1]} />
+               <meshStandardMaterial color="#ffffff" />
+            </mesh>
+            {/* Front Strip */}
+            <mesh position={[0, 0, roomDepth / 2 - 0.05]}>
+               <boxGeometry args={[roomWidth, 0.1, 0.1]} />
+               <meshStandardMaterial color="#ffffff" />
+            </mesh>
+            {/* Left Strip */}
+            <mesh position={[-roomWidth / 2 + 0.05, 0, 0]} rotation={[0, Math.PI / 2, 0]}>
+               <boxGeometry args={[roomDepth, 0.1, 0.1]} />
+               <meshStandardMaterial color="#ffffff" />
+            </mesh>
+            {/* Right Strip */}
+            <mesh position={[roomWidth / 2 - 0.05, 0, 0]} rotation={[0, Math.PI / 2, 0]}>
+               <boxGeometry args={[roomDepth, 0.1, 0.1]} />
+               <meshStandardMaterial color="#ffffff" />
+            </mesh>
+         </group>
+
+         {/* Floor Corner Trim / Baseboards */}
+         <group position={[0, 0.05, 0]}>
+            {/* Back Strip */}
+            <mesh position={[0, 0, -roomDepth / 2 + 0.05]}>
+               <boxGeometry args={[roomWidth, 0.1, 0.1]} />
+               <meshStandardMaterial color="#ffffff" />
+            </mesh>
+            {/* Front Strip */}
+            <mesh position={[0, 0, roomDepth / 2 - 0.05]}>
+               <boxGeometry args={[roomWidth, 0.1, 0.1]} />
+               <meshStandardMaterial color="#ffffff" />
+            </mesh>
+            {/* Left Strip */}
+            <mesh position={[-roomWidth / 2 + 0.05, 0, 0]} rotation={[0, Math.PI / 2, 0]}>
+               <boxGeometry args={[roomDepth, 0.1, 0.1]} />
+               <meshStandardMaterial color="#ffffff" />
+            </mesh>
+            {/* Right Strip */}
+            <mesh position={[roomWidth / 2 - 0.05, 0, 0]} rotation={[0, Math.PI / 2, 0]}>
+               <boxGeometry args={[roomDepth, 0.1, 0.1]} />
+               <meshStandardMaterial color="#ffffff" />
+            </mesh>
+         </group>
+
+         {/* WALLS */}
+         {/* Front Wall (Entrance) - Precisely constructed with cutouts for the door */}
+
+         {/* Re-implementing Precise Front Wall Cutouts */}
+         <mesh
+            position={[(-roomWidth / 2 + fHoleLeft) / 2, roomHeight / 2, roomDepth / 2 + 0.01]}
+            rotation={[0, Math.PI, 0]}
+            receiveShadow
+         >
+            <planeGeometry args={[Math.max(0.001, fHoleLeft - (-roomWidth / 2)), roomHeight]} />
+            <meshStandardMaterial map={wallTexture} roughness={0.7} />
+         </mesh>
+         <mesh
+            position={[(fHoleRight + roomWidth / 2) / 2, roomHeight / 2, roomDepth / 2 + 0.01]}
+            rotation={[0, Math.PI, 0]}
+            receiveShadow
+         >
+            <planeGeometry args={[roomWidth / 2 - fHoleRight, roomHeight]} />
+            <meshStandardMaterial map={wallTexture} roughness={0.7} />
+         </mesh>
+         <mesh
+            position={[frontDoorPosX, (roomHeight + frontDoorHeight) / 2, roomDepth / 2 + 0.01]}
+            rotation={[0, Math.PI, 0]}
+            receiveShadow
+         >
+            <planeGeometry args={[frontDoorWidth, roomHeight - frontDoorHeight]} />
+            <meshStandardMaterial map={wallTexture} roughness={0.7} />
+         </mesh>
+
+
+
+         {/* Smart Switchboard (Window Wall - Near Door Corner) */}
+         <group position={[-roomWidth / 2 + 0.02, 1.2, 1.5]} rotation={[0, Math.PI / 2, 0]}>
+            {/* Mounting Plate */}
+            <mesh castShadow>
+               <boxGeometry args={[0.2, 0.3, 0.02]} />
+               <meshStandardMaterial color="#222222" roughness={0.5} />
+            </mesh>
+            {/* Switchboard Face with Texture */}
+            <mesh position={[0, 0, 0.011]}>
+               <planeGeometry args={[0.18, 0.28]} />
+               <meshBasicMaterial map={switchboardTexture} transparent={true} />
+            </mesh>
+
+            {/* Floating Animated Button Indicator (Pushed out to avoid wall clipping) */}
+            <group position={[0, 0.21, 0.2]}>
+               <AnimatedSwitchButton
+                  disabled={!isDoorOpen}
+                  onClick={onToggleRemote}
+                  onHoverChange={(h) => {
+                     setSwitchboardHovered(h);
+                     // Auto-open remote on hover ONLY if door is open and not already showing
+                     if (h && isDoorOpen && !showRemote) {
+                        onToggleRemote();
+                     }
+                  }}
+               />
+            </group>
+         </group>
+
+         {/* Local Room Lighting - Toggled by Switchboard */}
+         <pointLight
+            position={[0, roomHeight - 0.5, 0]}
+            intensity={lightsOn ? currentIntensity : 0}
+            distance={15}
+            color={currentLightColor}
+            castShadow
+         />
+
+
+
+
+
+
+         {/* Back Wall */}
+         <mesh position={[0, roomHeight / 2, -roomDepth / 2]} receiveShadow>
+            <planeGeometry args={[roomWidth, roomHeight]} />
+            <meshStandardMaterial map={wallTexture} roughness={0.7} />
+         </mesh>
+
+
+
+         {/* GitHub Contribution Poster (Back Wall - Wall 2) - Refined Size with Shadow */}
+         <group position={[0, 1.8, -roomDepth / 2 + 0.04]} rotation={[0, 0, 0]}>
+            {/* TUBE LIGHT above poster */}
+            <group position={[0, 0.9, 0.05]}>
+               {/* Tube Light Housing / Fixture */}
+               <mesh position={[0, 0, -0.02]} castShadow>
+                  <boxGeometry args={[2.2, 0.08, 0.06]} />
+                  <meshStandardMaterial color="#333333" roughness={0.4} metalness={0.6} />
+               </mesh>
+               {/* Tube Light - Glowing White (rotated horizontally) - Only glows in normal mode */}
+               <mesh position={[0, -0.02, 0]} rotation={[0, 0, Math.PI / 2]}>
+                  <cylinderGeometry args={[0.025, 0.025, 2.0, 16]} />
+                  <meshBasicMaterial
+                     color={roomMode === 'normal' ? "#ffffff" : "#444444"}
+                     toneMapped={false}
+                  />
+               </mesh>
+               {/* Tube Light Glow Effect - Only visible in normal mode */}
+               {roomMode === 'normal' && (
+                  <mesh position={[0, -0.02, 0]} rotation={[0, 0, Math.PI / 2]}>
+                     <cylinderGeometry args={[0.04, 0.04, 2.0, 16]} />
+                     <meshBasicMaterial color="#ffffff" transparent opacity={0.3} toneMapped={false} />
+                  </mesh>
+               )}
+
+               {/* Linear Light Distribution - Only active in normal mode */}
+               {roomMode === 'normal' && (
+                  <>
+                     {/* Main Glow - RectAreaLight for linear soft light */}
+                     <rectAreaLight
+                        width={2.0}
+                        height={0.1}
+                        intensity={5}
+                        color="#ffffff"
+                        position={[0, -0.1, 0]}
+                        rotation={[-Math.PI / 2, 0, 0]}
+                     />
+                     {/* 3 Point Lights evenly spaced to flush the wall properly */}
+                     <pointLight position={[-0.8, -0.2, 0.2]} intensity={0.4} distance={3} color="#ffffff" decay={2} />
+                     <pointLight position={[0, -0.2, 0.2]} intensity={0.4} distance={3} color="#ffffff" decay={2} />
+                     <pointLight position={[0.8, -0.2, 0.2]} intensity={0.4} distance={3} color="#ffffff" decay={2} />
+                  </>
+               )}
+               {/* End Caps */}
+               <mesh position={[-1.0, -0.02, 0]} rotation={[0, 0, Math.PI / 2]}>
+                  <cylinderGeometry args={[0.03, 0.03, 0.04, 16]} />
+                  <meshStandardMaterial color="#888888" metalness={0.7} roughness={0.3} />
+               </mesh>
+               <mesh position={[1.0, -0.02, 0]} rotation={[0, 0, Math.PI / 2]}>
+                  <cylinderGeometry args={[0.03, 0.03, 0.04, 16]} />
+                  <meshStandardMaterial color="#888888" metalness={0.7} roughness={0.3} />
+               </mesh>
+            </group>
+
+            {/* Soft Contact Shadow (Fake Shadow Plane) */}
+            <mesh position={[0.02, -0.02, -0.015]}>
+               <planeGeometry args={[2.9, 1.2]} />
+               <meshBasicMaterial color="#000000" transparent opacity={0.3} depthWrite={false} />
+            </mesh>
+
+            {/* Thin Green Poster Border / Frame with Pencil Sketch Effect */}
+            <mesh position={[0, 0, 0.021]}>
+               <boxGeometry args={[2.85, 1.15, 0.04]} />
+               <meshStandardMaterial color="#22c55e" roughness={0.3} emissive="#22c55e" emissiveIntensity={0.1} />
+               {posterHovered && (
+                  <Edges
+                     scale={1.0}
+                     threshold={15}
+                     color="white"
+                     lineWidth={4}
+                  />
+               )}
+            </mesh>
+            {/* Poster Content */}
+            <mesh position={[0, 0, 0.021]}>
+               <planeGeometry args={[2.8, 1.1]} />
+               <meshStandardMaterial map={contributionTexture} />
+            </mesh>
+
+            {/* Floating Animated Button Indicator (Center Bottom of Poster - Pushed out) */}
+            <group position={[0, -0.4, 0.15]}>
+               <AnimatedSwitchButton
+                  disabled={!isDoorOpen}
+                  onClick={() => window.open('https://github.com/Deadlybutsoft', '_blank')}
+                  label="View GitHub"
+                  onHoverChange={setPosterHovered}
+               />
+            </group>
+         </group>
+
+         {/* Left Wall */}
+         <mesh position={[-roomWidth / 2, roomHeight / 2, 0]} rotation={[0, Math.PI / 2, 0]} receiveShadow>
+            <planeGeometry args={[roomDepth, roomHeight]} />
+            <meshStandardMaterial map={wallTexture} roughness={0.7} />
+         </mesh>
+
+
+
+         {/* Right Wall */}
+         <mesh position={[roomWidth / 2, roomHeight / 2, 0]} rotation={[0, -Math.PI / 2, 0]} receiveShadow>
+            <planeGeometry args={[roomDepth, roomHeight]} />
+            <meshStandardMaterial map={wallTexture} roughness={0.7} />
+         </mesh>
+
+         {/* PARTY MODE LASER - Single Source with 5 Sweeping Beams */}
+         {roomMode === 'party' && (
+            <group>
+               {/* Single Laser Light Source on Right Wall */}
+               <group position={[roomWidth / 2 - 0.05, 2.5, 0]}>
+                  {/* Glowing Core */}
+                  <mesh>
+                     <sphereGeometry args={[0.12, 16, 16]} />
+                     <meshBasicMaterial color={partyColor} toneMapped={false} />
+                  </mesh>
+                  <pointLight distance={10} intensity={5} color={partyColor} />
+
+                  {/* Beam 1 */}
+                  <group ref={laser1Ref}>
+                     <mesh position={[0.3, 0, 0]}>
+                        <cylinderGeometry args={[0.015, 0.015, 4, 8]} />
+                        <meshBasicMaterial color="#ff0044" toneMapped={false} transparent opacity={0.8} />
+                     </mesh>
+                     <pointLight position={[2, 0, 0]} distance={8} intensity={20} color="#ff0044" />
+                  </group>
+
+                  {/* Beam 2 */}
+                  <group ref={laser2Ref}>
+                     <mesh position={[0.3, 0, 0]}>
+                        <cylinderGeometry args={[0.015, 0.015, 4, 8]} />
+                        <meshBasicMaterial color="#00ff44" toneMapped={false} transparent opacity={0.8} />
+                     </mesh>
+                     <pointLight position={[2, 0, 0]} distance={8} intensity={20} color="#00ff44" />
+                  </group>
+
+                  {/* Beam 3 */}
+                  <group ref={laser3Ref}>
+                     <mesh position={[0.3, 0, 0]}>
+                        <cylinderGeometry args={[0.015, 0.015, 4, 8]} />
+                        <meshBasicMaterial color="#0088ff" toneMapped={false} transparent opacity={0.8} />
+                     </mesh>
+                     <pointLight position={[2, 0, 0]} distance={8} intensity={20} color="#0088ff" />
+                  </group>
+
+                  {/* Beam 4 */}
+                  <group ref={laser4Ref}>
+                     <mesh position={[0.3, 0, 0]}>
+                        <cylinderGeometry args={[0.015, 0.015, 4, 8]} />
+                        <meshBasicMaterial color="#aa00ff" toneMapped={false} transparent opacity={0.8} />
+                     </mesh>
+                     <pointLight position={[2, 0, 0]} distance={8} intensity={20} color="#aa00ff" />
+                  </group>
+
+                  {/* Beam 5 */}
+                  <group ref={laser5Ref}>
+                     <mesh position={[0.3, 0, 0]}>
+                        <cylinderGeometry args={[0.015, 0.015, 4, 8]} />
+                        <meshBasicMaterial color="#00ffff" toneMapped={false} transparent opacity={0.8} />
+                     </mesh>
+                     <pointLight position={[2, 0, 0]} distance={8} intensity={20} color="#00ffff" />
+                  </group>
+               </group>
+            </group>
+         )}
+
+         {/* Animated Laser Sweep Controller - Separate group that moves to control laser directions */}
+         <group
+            rotation={[0, Math.PI, 0]}
+            onUpdate={(self) => {
+               if (roomMode === 'party') {
+                  const t = performance.now() * 0.001;
+                  // Sweeping motion for lasers
+                  self.rotation.x = Math.sin(t * 0.7) * 0.5;
+                  self.rotation.z = Math.cos(t * 0.5) * 0.3;
+               }
+            }}
+         />
+
+
+
+         {/* Motivational Quote Frame (Right Wall - Wall 4) */}
+         <group position={[roomWidth / 2 - 0.04, 1.8, 0]} rotation={[0, -Math.PI / 2, 0]}>
+            {/* Frame Background / Shadow */}
+            <mesh position={[0, 0, -0.01]}>
+               <planeGeometry args={[1.1, 1.45]} />
+               <meshBasicMaterial color="#000000" transparent opacity={0.3} />
+            </mesh>
+            {/* Elegant Black Frame */}
+            <mesh castShadow>
+               <boxGeometry args={[1.05, 1.4, 0.05]} />
+               <meshStandardMaterial color="#1a1a1a" roughness={0.1} metalness={0.2} />
+            </mesh>
+            {/* The Poster Content */}
+            <mesh position={[0, 0, 0.026]}>
+               <planeGeometry args={[0.95, 1.3]} />
+               <meshStandardMaterial map={quoteTexture} />
+            </mesh>
+            {/* Glass Overlay Glow */}
+            <mesh position={[0, 0, 0.027]}>
+               <planeGeometry args={[0.95, 1.3]} />
+               <meshStandardMaterial color="white" transparent opacity={0.05} roughness={0} metalness={1} />
+            </mesh>
+         </group>
+
+
+
+         {/* --- WALL 4 PROJECTS (Mini Github Projects) REMOVED --- */}
+
+
+
+         {/* --- FIXTURES & DECOR --- */}
+
+         {/* Realistic Ceiling Fan - Scaled Down */}
+         <group position={[0, roomHeight - 0.05, 0]} scale={0.7}>
+            {/* Mounting Rod */}
+            <mesh position={[0, -0.15, 0]}>
+               <cylinderGeometry args={[0.03, 0.03, 0.3, 16]} />
+               <meshStandardMaterial color="#333" metalness={0.8} roughness={0.2} />
+            </mesh>
+
+            <group position={[0, -0.3, 0]} ref={fanRef}>
+               {/* Main Motor Housing (Top Part) */}
+               <mesh position={[0, 0.05, 0]}>
+                  <cylinderGeometry args={[0.2, 0.25, 0.15, 32]} />
+                  <meshStandardMaterial color="#222" metalness={0.9} roughness={0.1} />
+               </mesh>
+               {/* Main Motor Housing (Bottom Bowl) */}
+               <mesh position={[0, -0.05, 0]} rotation={[Math.PI, 0, 0]}>
+                  <sphereGeometry args={[0.25, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2]} />
+                  <meshStandardMaterial color="#222" metalness={0.9} roughness={0.1} />
+               </mesh>
+
+               {/* Blade Connector Arms & Blades */}
+               {[0, 1, 2, 3].map(i => (
+                  <group key={i} rotation={[0, i * (Math.PI / 2), 0]}>
+                     {/* Connector Arm */}
+                     <mesh position={[0.2, 0, 0]} rotation={[0, 0, Math.PI / 2]}>
+                        <cylinderGeometry args={[0.02, 0.02, 0.2, 16]} />
+                        <meshStandardMaterial color="#444" metalness={1} roughness={0.2} />
+                     </mesh>
+                     {/* Realistic Tapered Blade */}
+                     <mesh position={[0.9, -0.02, 0]} rotation={[0.05, 0, 0]}>
+                        <boxGeometry args={[1.4, 0.01, 0.18]} />
+                        <meshStandardMaterial color="#111" roughness={0.8} />
+                     </mesh>
+                     {/* Blade Tip Detail */}
+                     <mesh position={[1.6, -0.02, 0]} rotation={[0.05, Math.PI / 2, Math.PI / 2]}>
+                        <cylinderGeometry args={[0.09, 0.09, 0.01, 32, 1, false, 0, Math.PI]} />
+                        <meshStandardMaterial color="#111" roughness={0.8} />
+                     </mesh>
+                  </group>
+               ))}
+
+               {/* Center Cap / Light Cover */}
+               <mesh position={[0, -0.06, 0]}>
+                  <cylinderGeometry args={[0.12, 0.12, 0.02, 32]} />
+                  <meshStandardMaterial color="#333" />
+               </mesh>
+            </group>
+         </group>
+
+         {/* Optional: Remove or keep the existing Rug. I'll remove it as requested "carpet floor" usually covers everything. */}
+         {/* <mesh position={[0, 0.02, 1]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+            <planeGeometry args={[4, 5]} />
+            <meshStandardMaterial color="#ffffff" roughness={1} />
+         </mesh> */}
+
+         {/* Window on Left Wall - 16:9 View with White Border */}
+         <group position={[-roomWidth / 2 + 0.015, 1.7, -1.0]} rotation={[0, Math.PI / 2, 0]}>
+            {/* Brown Border / Frame */}
+            <mesh position={[0, 0, -0.01]}>
+               <boxGeometry args={[2.28, 1.53, 0.02]} />
+               <meshStandardMaterial color="#5d4037" roughness={0.6} />
+            </mesh>
+            {/* Glass area (The view panel) */}
+            <mesh position={[0, 0, 0.005]}>
+               <planeGeometry args={[2.24, 1.53]} />
+               <meshBasicMaterial map={windowTexture} />
+            </mesh>
+         </group>
+
+         {/* Photo Frames Collage - Left Wall (Side of Window) - Documents/Degree Watermark Style */}
+         <group position={[-roomWidth / 2 + 0.02, 0, 1.5]} rotation={[0, Math.PI / 2, 0]}>
+            {/* Frame 1 - Top Left (largest, like main degree/certificate) */}
+            <group position={[-0.1, 2.3, 0]} rotation={[0, 0, -0.05]}>
+               {/* Frame Border */}
+               <RoundedBox args={[0.32, 0.42, 0.03]} radius={0.015} smoothness={4} castShadow>
+                  <meshStandardMaterial color="#8B7355" roughness={0.5} />
+               </RoundedBox>
+               {/* Document Texture Background */}
+               <mesh position={[0, 0, 0.016]}>
+                  <planeGeometry args={[0.28, 0.38]} />
+                  <meshStandardMaterial
+                     map={skillsBgTexture}
+                     roughness={0.8}
+                  />
+               </mesh>
+               {/* Watermark Overlay */}
+               <mesh position={[0, 0, 0.017]}>
+                  <planeGeometry args={[0.28, 0.38]} />
+                  <meshBasicMaterial
+                     color="#f5f0e6"
+                     transparent
+                     opacity={0.85}
+                  />
+               </mesh>
+            </group>
+
+            {/* Frame 2 - Top Right (tilted, like supplementary doc) */}
+            <group position={[0.18, 2.35, 0.08]} rotation={[0, 0.1, 0.08]}>
+               {/* Frame Border */}
+               <RoundedBox args={[0.26, 0.34, 0.03]} radius={0.012} smoothness={4} castShadow>
+                  <meshStandardMaterial color="#7A6B5A" roughness={0.5} />
+               </RoundedBox>
+               {/* Document Texture Background */}
+               <mesh position={[0, 0, 0.016]}>
+                  <planeGeometry args={[0.22, 0.30]} />
+                  <meshStandardMaterial
+                     map={skillsBgBlackTexture}
+                     roughness={0.8}
+                  />
+               </mesh>
+               {/* Watermark Overlay */}
+               <mesh position={[0, 0, 0.017]}>
+                  <planeGeometry args={[0.22, 0.30]} />
+                  <meshBasicMaterial
+                     color="#e8dcc8"
+                     transparent
+                     opacity={0.8}
+                  />
+               </mesh>
+            </group>
+
+            {/* Frame 3 - Middle Left (tilted other way) */}
+            <group position={[-0.2, 1.65, 0.06]} rotation={[0, -0.08, 0.06]}>
+               {/* Frame Border */}
+               <RoundedBox args={[0.24, 0.32, 0.03]} radius={0.012} smoothness={4} castShadow>
+                  <meshStandardMaterial color="#6B5B4A" roughness={0.5} />
+               </RoundedBox>
+               {/* Document Texture Background */}
+               <mesh position={[0, 0, 0.016]}>
+                  <planeGeometry args={[0.20, 0.28]} />
+                  <meshStandardMaterial
+                     map={skillsBgNewTexture}
+                     roughness={0.8}
+                  />
+               </mesh>
+               {/* Watermark Overlay */}
+               <mesh position={[0, 0, 0.017]}>
+                  <planeGeometry args={[0.20, 0.28]} />
+                  <meshBasicMaterial
+                     color="#d4c4a8"
+                     transparent
+                     opacity={0.85}
+                  />
+               </mesh>
+            </group>
+
+            {/* Frame 4 - Middle Right */}
+            <group position={[0.15, 1.6, 0]} rotation={[0, 0.05, -0.04]}>
+               {/* Frame Border */}
+               <RoundedBox args={[0.22, 0.28, 0.03]} radius={0.01} smoothness={4} castShadow>
+                  <meshStandardMaterial color="#5B4B3A" roughness={0.5} />
+               </RoundedBox>
+               {/* Document Texture Background */}
+               <mesh position={[0, 0, 0.016]}>
+                  <planeGeometry args={[0.18, 0.24]} />
+                  <meshStandardMaterial
+                     map={skillsBgGrainyTexture}
+                     roughness={0.8}
+                  />
+               </mesh>
+               {/* Watermark Overlay */}
+               <mesh position={[0, 0, 0.017]}>
+                  <planeGeometry args={[0.18, 0.24]} />
+                  <meshBasicMaterial
+                     color="#c4b498"
+                     transparent
+                     opacity={0.8}
+                  />
+               </mesh>
+            </group>
+
+            {/* Frame 5 - Bottom (largest, like degree scroll) */}
+            <group position={[0, 1.15, 0.04]} rotation={[0, 0, 0.03]}>
+               {/* Frame Border */}
+               <RoundedBox args={[0.36, 0.28, 0.03]} radius={0.012} smoothness={4} castShadow>
+                  <meshStandardMaterial color="#4B3B2A" roughness={0.5} />
+               </RoundedBox>
+               {/* Document Texture Background */}
+               <mesh position={[0, 0, 0.016]}>
+                  <planeGeometry args={[0.32, 0.24]} />
+                  <meshStandardMaterial
+                     map={skillsBgTexture}
+                     roughness={0.8}
+                  />
+               </mesh>
+               {/* Watermark Overlay */}
+               <mesh position={[0, 0, 0.017]}>
+                  <planeGeometry args={[0.32, 0.24]} />
+                  <meshBasicMaterial
+                     color="#b4a488"
+                     transparent
+                     opacity={0.75}
+                  />
+               </mesh>
+            </group>
+         </group>
+
+         {/* Hexagon Wall Lights (Back Wall - Wall 2 - Left of Poster) */}
+         <group position={[-2.5, 1.6, -roomDepth / 2 + 0.05]} rotation={[0, 0, 0]}>
+            {[
+               [0, 0], [0.3, 0.17], [0.3, -0.17], [0, 0.34], [-0.3, 0.17]
+            ].map((pos, i) => (
+               <group key={i} position={[pos[0], pos[1], 0]}>
+                  {/* Subtle Hexagon Drop Shadow - offset down-right */}
+                  <mesh position={[0.015, -0.015, -0.01]} rotation={[Math.PI / 2, 0, 0]}>
+                     <cylinderGeometry args={[0.165, 0.165, 0.005, 6]} />
+                     <meshBasicMaterial color="#000000" transparent opacity={0.2} depthWrite={false} />
+                  </mesh>
+
+                  {/* Hexagon Light Body */}
+                  <mesh rotation={[Math.PI / 2, 0, 0]} castShadow>
+                     <cylinderGeometry args={[0.16, 0.16, 0.05, 6]} />
+                     <meshBasicMaterial
+                        color={(roomMode === 'party' && hexagonLightsOn) ? partyColor : "#ffffff"}
+                        toneMapped={false}
+                        opacity={(hexagonLightsOn || roomMode === 'party') ? 1 : 0.6}
+                        transparent
+                     />
+                  </mesh>
+
+                  {(hexagonLightsOn || roomMode === 'party') && (
+                     <pointLight distance={1} intensity={0.5} color={roomMode === 'party' ? partyColor : "white"} />
+                  )}
+               </group>
+            ))}
+         </group>
+
+         {/* Neon Squiggle (Back Wall - Above Bed on Right) */}
+
+         {/* Diwali Fairy Lights - Single Strand on Bed Side Wall (Right Wall) */}
+         <group>
+            {/* Loop 1 (Left Corner to Right) */}
+            <FairyLightStrand
+               start={[3.9, 3.05, -2.9]}
+               mid={[3.9, 2.75, -1.35]}
+               end={[3.9, 3.05, 0.2]}
+            />
+            {/* Loop 2 (Right Side) */}
+            <FairyLightStrand
+               start={[3.9, 3.05, 0.2]}
+               mid={[3.9, 2.75, 1.55]}
+               end={[3.9, 3.05, 2.9]}
+            />
+         </group>
+
+
+
+         {/* --- FURNITURE --- */}
+
+
+         {/* MODERN WHITE SHELF UNIT (Front Wall - Between Door and Dresser) */}
+         <group position={[-1.2, 0, roomDepth / 2 - 0.4]} rotation={[0, Math.PI, 0]}>
+            {/* Shelf Unit Contact Shadow - One soft unified shadow */}
+            <mesh position={[0, 0.002, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+               <planeGeometry args={[2.5, 0.45]} />
+               <meshBasicMaterial color="#000000" transparent opacity={0.1} depthWrite={false} />
+            </mesh>
+
+            {/* Vertical Panels - Redesigned for 2 Columns */}
+            {[-1.2, 0, 1.2].map((x, i) => (
+               <mesh key={i} position={[x, 1.5, 0]} castShadow>
+                  <boxGeometry args={[0.04, 3.0, 0.4]} />
+                  <meshStandardMaterial map={deskTexture} roughness={0.4} />
+               </mesh>
+            ))}
+
+            {/* Horizontal Shelves - Unified wood finish */}
+            {[0.1, 1.05, 2.0, 2.95].map((y, i) => (
+               <mesh key={i} position={[0, y, 0]} castShadow receiveShadow>
+                  <boxGeometry args={[2.4, 0.04, 0.4]} />
+                  <meshStandardMaterial map={deskTexture} roughness={0.4} />
+               </mesh>
+            ))}
+
+            {/* Back Panel - Matching Shelf Wood Finish */}
+            <mesh position={[0, 1.5, -0.18]}>
+               <planeGeometry args={[2.4, 3.0]} />
+               <meshStandardMaterial
+                  map={deskTexture}
+                  roughness={0.4}
+                  emissive="#3d2b1f"
+                  emissiveIntensity={0.2}
+               />
+               {shelfHovered && (
+                  <Edges scale={1.0} threshold={15} color="#2a1b12" />
+               )}
+            </mesh>
+
+
+            {/* --- DECOR ITEMS (Minimalist Modern) --- */}
+
+            {/* Diwali Fairy Lights - Vertical on Window Wall Corner (Left-Back) */}
+            <FairyLightStrand
+               start={[-3.8, 3.15, -2.9]}
+               mid={[-3.8, 2.5, -2.85]}
+               end={[-3.8, 1.0, -2.9]}
+            />
+
+            {/* Bottom Shelf: GitHub, Resume */}
+            <group position={[0, 0, 0]}>
+               {/* GitHub Trophy (Left Box Center) */}
+               <group
+                  position={[-0.6, 0.4, 0]}
+                  onPointerOver={() => {
+                     if (!isDoorOpen) return;
+                     setGithubHovered(true);
+                     document.body.style.cursor = "pointer";
+                  }}
+                  onPointerOut={() => {
+                     setGithubHovered(false);
+                     document.body.style.cursor = "auto";
+                  }}
+                  onClick={() => isDoorOpen && window.open("https://github.com/Deadlybutsoft", "_blank")}
+               >
+                  {/* Main Block / Trophy Base - Green Gradient Concept (Solid Bright Green) */}
+                  <RoundedBox args={[0.5, 0.5, 0.1]} radius={0.06} smoothness={4} castShadow>
+                     <meshStandardMaterial color="#0a0a0a" roughness={0.25} metalness={0.2} />
+                  </RoundedBox>
+
+                  {/* GitHub Logo Texture */}
+                  <mesh position={[0, 0, 0.051]}>
+                     <planeGeometry args={[0.35, 0.35]} />
+                     <meshStandardMaterial
+                        map={githubLogoTexture}
+                        transparent={true}
+                        roughness={0.1}
+                        metalness={0.1}
+                        color="white"
+                     />
+                  </mesh>
+
+                  {/* Hover Edge Line */}
+                  {githubHovered && (
+                     <mesh position={[0, 0, 0.052]}>
+                        <planeGeometry args={[0.52, 0.52]} />
+                        <meshBasicMaterial color="white" transparent opacity={0} />
+                        <Edges lineWidth={2} color="white" />
+                     </mesh>
+                  )}
+
+                  {/* Tooltip */}
+                  {githubHovered && (
+                     <Html position={[0, 0.56, 0]} center distanceFactor={6}>
+                        <div className="github-tooltip">
+                           <h1>
+                              <span className="word">VIEW</span>
+                              <span className="word superscript">GITHUB</span>
+                           </h1>
+                        </div>
+                     </Html>
+                  )}
+               </group>
+
+               {/* Resume Download Trophy (Right Box Center) */}
+               <group
+                  position={[0.6, 0.4, 0]}
+                  onPointerOver={() => {
+                     if (!isDoorOpen) return;
+                     setCvHovered(true);
+                     document.body.style.cursor = "pointer";
+                  }}
+                  onPointerOut={() => {
+                     setCvHovered(false);
+                     document.body.style.cursor = "auto";
+                  }}
+                  onClick={() => {
+                     if (!isDoorOpen) return;
+                     void smartDownload("/resume.pdf", "Suvo-Resume.pdf");
+                  }}
+               >
+                  {/* Main Block / Trophy Base - Green Gradient Concept (Solid Bright Green) */}
+                  <RoundedBox args={[0.5, 0.5, 0.1]} radius={0.06} smoothness={4} castShadow>
+                     <meshStandardMaterial color="#ffffff" roughness={0.25} metalness={0.05} />
+                  </RoundedBox>
+
+                  {/* Download Icon Texture */}
+                  <mesh position={[0, 0, 0.051]}>
+                     <planeGeometry args={[0.35, 0.35]} />
+                     <meshStandardMaterial
+                        map={downloadIconTexture}
+                        transparent={true}
+                        roughness={0.1}
+                        metalness={0.1}
+                     />
+                  </mesh>
+
+                  {/* Hover Edge Line */}
+                  {cvHovered && (
+                     <mesh position={[0, 0, 0.052]}>
+                        <planeGeometry args={[0.52, 0.52]} />
+                        <meshBasicMaterial color="white" transparent opacity={0} />
+                        <Edges lineWidth={2} color="white" />
+                     </mesh>
+                  )}
+
+                  {/* Tooltip */}
+                  {cvHovered && (
+                     <Html position={[0, 0.48, 0]} center distanceFactor={6}>
+                        <div className="github-tooltip">
+                           <h1>
+                              <span className="word">DOWNLOAD</span>
+                              <span className="word superscript">RESUME</span>
+                           </h1>
+                        </div>
+                     </Html>
+                  )}
+               </group>
+            </group>
+
+            {/* 2. Middle Shelf: Contra, Mail */}
+            <group position={[0, 1.07, 0]}>
+               {/* Contra Trophy (Left Box Center) */}
+               <group
+                  position={[-0.6, 0.22, 0]}
+                  onPointerOver={() => {
+                     if (!isDoorOpen) return;
+                     setContraHovered(true);
+                     document.body.style.cursor = 'pointer';
+                  }}
+                  onPointerOut={() => { setContraHovered(false); document.body.style.cursor = 'auto'; }}
+                  onClick={() => isDoorOpen && window.open('https://contra.com/suvoiknow/work', '_blank')}
+               >
+                  {/* Icon Block - Same thin style as LinkedIn/X */}
+                  <RoundedBox args={[0.5, 0.5, 0.08]} radius={0.07} smoothness={4} castShadow>
+                     <meshStandardMaterial color="#FF6B35" roughness={0.2} metalness={0.5} />
+                     {contraHovered && <Edges lineWidth={2} threshold={15} color="white" />}
+                  </RoundedBox>
+                  {/* Contra Logo Texture */}
+                  <mesh position={[0, 0, 0.041]}>
+                     <planeGeometry args={[0.45, 0.45]} />
+                     <meshStandardMaterial
+                        map={contraLogoTexture}
+                        transparent={true}
+                        toneMapped={false}
+                        color="white"
+                     />
+                  </mesh>
+                  {/* Tooltip */}
+                  {contraHovered && (
+                     <Html position={[0, 0.5, 0]} center distanceFactor={6}>
+                        <div className="github-tooltip">
+                           <h1>
+                              <span className="word">VIEW</span>
+                              <span className="word superscript">CONTRA</span>
+                           </h1>
+                        </div>
+                     </Html>
+                  )}
+               </group>
+
+               {/* Mail Icon in Right Box Center */}
+               <group
+                  position={[0.6, 0.22, 0]}
+                  onPointerOver={() => {
+                     if (!isDoorOpen) return;
+                     setMailHovered(true);
+                     document.body.style.cursor = 'pointer';
+                  }}
+                  onPointerOut={() => { setMailHovered(false); document.body.style.cursor = 'auto'; }}
+                  onClick={() => isDoorOpen && window.open('mailto:SuvoIknow@proton.me', '_blank')}
+               >
+                  {/* Main Block / Trophy Base - Green Gradient Concept (Solid Bright Green) */}
+                  <RoundedBox args={[0.5, 0.5, 0.1]} radius={0.06} smoothness={4} castShadow>
+                     <meshStandardMaterial color="#10b981" roughness={0.2} metalness={0.1} />
+                  </RoundedBox>
+
+                  {/* Mail Icon Texture */}
+                  <mesh position={[0, 0, 0.051]}>
+                     <planeGeometry args={[0.35, 0.35]} />
+                     <meshStandardMaterial
+                        map={mailIconTexture}
+                        transparent={true}
+                        roughness={0.1}
+                        metalness={0.1}
+                     />
+                  </mesh>
+
+                  {/* Hover Edge Line */}
+                  {mailHovered && (
+                     <mesh position={[0, 0, 0.052]}>
+                        <planeGeometry args={[0.52, 0.52]} />
+                        <meshBasicMaterial color="white" transparent opacity={0} />
+                        <Edges lineWidth={2} color="white" />
+                     </mesh>
+                  )}
+
+                  {/* Tooltip */}
+                  {mailHovered && (
+                     <Html position={[0, 0.48, 0]} center distanceFactor={6}>
+                        <div className="github-tooltip">
+                           <h1>
+                              <span className="word">CONTACT</span>
+                              <span className="word superscript">MAIL</span>
+                           </h1>
+                        </div>
+                     </Html>
+                  )}
+               </group>
+            </group>
+
+
+
+            {/* 3. Top Shelf: LinkedIn and X */}
+            <group position={[0, 2.02, 0]}>
+               {/* LinkedIn Trophy (Left Box Center) */}
+               <group
+                  position={[-0.6, 0.22, 0]}
+                  onPointerOver={() => {
+                     if (!isDoorOpen) return;
+                     setLinkedinHovered(true);
+                     document.body.style.cursor = 'pointer';
+                  }}
+                  onPointerOut={() => { setLinkedinHovered(false); document.body.style.cursor = 'auto'; }}
+                  onClick={() => isDoorOpen && window.open('https://www.linkedin.com/in/suvoiknow/', '_blank')}
+               >
+                  {/* Icon Block */}
+                  <RoundedBox args={[0.5, 0.5, 0.08]} radius={0.07} smoothness={4} castShadow>
+                     <meshStandardMaterial color="#0077b5" roughness={0.2} metalness={0.5} />
+                     {linkedinHovered && <Edges lineWidth={2} threshold={15} color="white" />}
+                  </RoundedBox>
+                  <Text position={[0, -0.01, 0.05]} fontSize={0.35} color="white" anchorX="center" anchorY="middle">
+                     in
+                  </Text>
+                  {/* Tooltip */}
+                  {linkedinHovered && (
+                     <Html position={[0, 0.5, 0]} center distanceFactor={6}>
+                        <div className="github-tooltip">
+                           <h1>
+                              <span className="word">VIEW</span>
+                              <span className="word superscript">LINKEDIN</span>
+                           </h1>
+                        </div>
+                     </Html>
+                  )}
+               </group>
+
+               {/* X (Twitter) Trophy (Right Box Center) */}
+               <group
+                  position={[0.6, 0.22, 0]}
+                  onPointerOver={() => {
+                     if (!isDoorOpen) return;
+                     setXHovered(true);
+                     document.body.style.cursor = 'pointer';
+                  }}
+                  onPointerOut={() => { setXHovered(false); document.body.style.cursor = 'auto'; }}
+                  onClick={() => isDoorOpen && window.open('https://x.com/suvoiknow', '_blank')}
+               >
+                  {/* Icon Block */}
+                  <RoundedBox args={[0.5, 0.5, 0.08]} radius={0.04} smoothness={4} castShadow>
+                     <meshStandardMaterial color="#000000" roughness={0.1} metalness={0.8} />
+                  </RoundedBox>
+                  {/* Edge Outline */}
+                  {xHovered && (
+                     <mesh position={[0, 0, 0.041]}>
+                        <planeGeometry args={[0.52, 0.52]} />
+                        <meshBasicMaterial color="white" transparent opacity={0} />
+                        <Edges lineWidth={2} color="white" />
+                     </mesh>
+                  )}
+                  <Text position={[0, 0, 0.05]} fontSize={0.35} color="white" anchorX="center" anchorY="middle">
+                     X
+                  </Text>
+                  {/* Tooltip */}
+                  {xHovered && (
+                     <Html position={[0, 0.5, 0]} center distanceFactor={6}>
+                        <div className="github-tooltip">
+                           <h1>
+                              <span className="word">VIEW</span>
+                              <span className="word superscript">X</span>
+                           </h1>
+                        </div>
+                     </Html>
+                  )}
+               </group>
+            </group>
+
+         </group>
+         {/* 3D BIG SPEAKER (Below tv - Small) */}
+         <group position={[0.4, 0, roomDepth / 2 - 0.4]} rotation={[0, Math.PI / 2, 0]}>
+            {/* Speaker Contact Shadow */}
+            <mesh position={[0, 0.002, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+               <circleGeometry args={[0.1, 32]} />
+               <meshBasicMaterial color="#000000" transparent opacity={0.1} depthWrite={false} />
+            </mesh>
+            <primitive object={speakerModel} scale={0.0008} />
+         </group>
+
+
+
+         <CubicBezierLine
+            start={[0.7, 1.15, 2.94]}  // TV Bottom LEFT Corner (closer to shelf)
+            end={[-0.02, 1.05, 2.6]}   // Shelf Right Edge
+            midA={[0.7, 0.5, 2.94]}    // Drop down from corner
+            midB={[0.4, 0.6, 2.8]}     // Curve towards shelf
+            color="black"
+            lineWidth={3}
+         />
+
+         {/* Wire connecting Speaker to Shelf */}
+         <CubicBezierLine
+            start={[0.4, 0.4, 2.6]}    // Speaker Top/Back
+            end={[-0.02, 0.2, 2.6]}    // Shelf Bottom Right
+            midA={[0.3, 0.2, 2.65]}    // Curve
+            midB={[0.1, 0.1, 2.65]}    // Curve
+            color="black"
+            lineWidth={3}
+         />
+
+         {/* Wall Mounted tv (Right of Shelf) - Always On, Glossy Black Frame */}
+         <group position={[1.5, 1.6, roomDepth / 2 - 0.05]} rotation={[0, Math.PI, 0]} scale={0.9}>
+            {/* TV Screen - Glossy Black with Permanent Glow */}
+            <mesh position={[0, 0, 0]} castShadow>
+               <boxGeometry args={[1.8, 1.0, 0.05]} />
+               <meshStandardMaterial
+                  color="#000000"
+                  roughness={0.1}
+                  metalness={0.8}
+                  emissive="#38bdf8"
+                  emissiveIntensity={0.3}
+               />
+               <pointLight position={[0, 0, 0.5]} distance={2} intensity={0.5} color="#38bdf8" />
+            </mesh>
+
+            {/* TV GIF CONTENT - PERMANENTLY FULL BRIGHTNESS */}
+            <Html
+               transform
+               occlude="blending"
+               position={[0, 0, 0.026]}
+               scale={0.05}
+               style={{
+                  pointerEvents: 'none',
+                  display: (inHallway || isPopupOpen) ? 'none' : 'block'
+               }}
+            >
+               <div style={{
+                  width: "1800px",
+                  height: "1000px",
+                  overflow: "hidden",
+                  background: "#000000",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  border: "25px solid #000000",
+                  boxShadow: "inset 0 0 50px rgba(255,255,255,0.1)",
+                  borderRadius: "20px"
+               }}>
+                  <img
+                     src="/tv-gif.gif"
+                     alt="TV Content"
+                     style={{
+                        width: "100%",
+                        height: "100%",
+                        objectFit: "cover",
+                        opacity: 1,
+                        filter: `brightness(1.4) contrast(1.2) saturate(1.1)`,
+                        borderRadius: "10px"
+                     }}
+                  />
+               </div>
+            </Html>
+
+            {/* TV Frame/Bezel - Glossy Black Finish */}
+            <mesh position={[0, 0, -0.01]}>
+               <boxGeometry args={[1.86, 1.06, 0.04]} />
+               <meshStandardMaterial color="#000000" roughness={0.05} metalness={0.9} />
+            </mesh>
+            {/* Wall Mount Bracket */}
+            <mesh position={[0, 0, -0.05]}>
+               <boxGeometry args={[0.6, 0.4, 0.04]} />
+               <meshStandardMaterial color="#333333" metalness={0.7} />
+            </mesh>
+         </group>
+
+         {/* BED (Back Right Corner) - Enlarged and simplified */}
+         <group position={[2.6, 0.25, -roomDepth / 2 + 1.6]}>
+            {/* Bed Contact Shadow */}
+            <mesh position={[0.08, -0.24, 0.08]} rotation={[-Math.PI / 2, 0, 0]}>
+               <planeGeometry args={[2.8, 3.4]} />
+               <meshBasicMaterial color="#000000" transparent opacity={0.3} depthWrite={false} />
+            </mesh>
+            {/* Base - Now with Walnut Wood Treatment */}
+            <mesh position={[0, 0, 0]} castShadow receiveShadow>
+               <boxGeometry args={[2.6, 0.5, 3.2]} /> {/* Long desk */}
+               <meshStandardMaterial map={bedBaseTexture} roughness={0.4} /> {/* Walnut Wood */}
+            </mesh>
+            {/* Mattress / Duvet - Now with Rounded Corners and realistic fabric texture */}
+            <group position={[0, 0.2, 0]}>
+               <RoundedBox
+                  args={[2.5, 0.4, 3.1]}
+                  radius={0.1}
+                  smoothness={4}
+                  castShadow
+                  receiveShadow
+               >
+                  <meshStandardMaterial map={bedTexture} roughness={1} />
+               </RoundedBox>
+            </group>
+            {/* Single Centered Pillow - Now with Rounded Corners */}
+            <group position={[0, 0.5, -1.3]} rotation={[0.2, 0, 0]}>
+               <RoundedBox
+                  args={[1.2, 0.25, 0.6]} // width, height, depth
+                  radius={0.12} // corner radius
+                  smoothness={4} // segments
+                  castShadow
+                  receiveShadow
+               >
+                  <meshStandardMaterial map={pillowTexture} roughness={1} />
+               </RoundedBox>
+            </group>
+
+            {/* Closed Laptop Lying on Bed */}
+            <group position={[-0.8, 0.415, 1.1]} rotation={[0, 0.5, 0]}>
+               {/* Laptop Contact Shadows (Double-sided for depth) */}
+               <mesh position={[-0.015, -0.005, 0.01]} rotation={[-Math.PI / 2, 0, 0]}>
+                  <planeGeometry args={[0.55, 0.38]} />
+                  <meshBasicMaterial color="#000000" transparent opacity={0.2} depthWrite={false} />
+               </mesh>
+               <mesh position={[0.015, -0.005, -0.01]} rotation={[-Math.PI / 2, 0, 0]}>
+                  <planeGeometry args={[0.55, 0.38]} />
+                  <meshBasicMaterial color="#000000" transparent opacity={0.2} depthWrite={false} />
+               </mesh>
+               {/* Laptop Base */}
+               <RoundedBox
+                  args={[0.5, 0.01, 0.35]} // Thinner base
+                  radius={0.005}
+                  smoothness={4}
+                  castShadow
+                  receiveShadow
+               >
+                  <meshStandardMaterial color="#c0c0c0" metalness={0.7} roughness={0.3} />
+               </RoundedBox>
+               {/* Laptop Lid (Closed) */}
+               <RoundedBox
+                  args={[0.5, 0.008, 0.35]} // Thinner lid
+                  radius={0.005}
+                  smoothness={4}
+                  position={[0, 0.009, 0]}
+                  castShadow
+               >
+                  <meshStandardMaterial color="#c0c0c0" metalness={0.7} roughness={0.3} />
+               </RoundedBox>
+               {/* Apple Logo on Lid (Texture) - Corrected Height */}
+               <mesh position={[0, 0.0245, 0]} rotation={[-Math.PI / 2, 0, Math.PI]}>
+                  <planeGeometry args={[0.08, 0.08]} />
+                  <meshBasicMaterial
+                     map={appleLogoTexture}
+                     transparent={true}
+                     opacity={0.9}
+                     toneMapped={false}
+                  />
+               </mesh>
+            </group>
+         </group>
+
+         {/* DESK SETUP (Pushed into Back Left Corner) */}
+         <group position={[-roomWidth / 2 + 0.5, 0, -1.25]}>
+            {/* Desk Top */}
+            <mesh position={[0, 0.65, 0]} castShadow receiveShadow>
+               <boxGeometry args={[1.0, 0.05, 3.5]} /> {/* Long desk */}
+               <meshStandardMaterial map={deskTexture} roughness={0.4} /> {/* Walnut Wood */}
+            </mesh>
+            {/* Legs (Alex Drawers style) - Three Tone: Walnut Body with Metallic Green Fronts */}
+            <group position={[0, 0.31, -1.4]}>
+               <mesh castShadow receiveShadow>
+                  <boxGeometry args={[0.9, 0.62, 0.5]} />
+                  <meshStandardMaterial map={cabinetTexture} roughness={0.4} />
+               </mesh>
+               <mesh position={[0.455, 0, 0]} castShadow>
+                  <boxGeometry args={[0.02, 0.60, 0.48]} />
+                  <meshStandardMaterial map={drawerTexture} metalness={0.6} roughness={0.3} />
+               </mesh>
+            </group>
+            <group position={[0, 0.31, 1.4]}>
+               <mesh castShadow receiveShadow>
+                  <boxGeometry args={[0.9, 0.62, 0.5]} />
+                  <meshStandardMaterial map={cabinetTexture} roughness={0.4} />
+               </mesh>
+               <mesh position={[0.455, 0, 0]} castShadow>
+                  <boxGeometry args={[0.02, 0.60, 0.48]} />
+                  <meshStandardMaterial map={drawerTexture} metalness={0.6} roughness={0.3} />
+               </mesh>
+            </group>
+
+            {/* === DESK ACCESSORIES === */}
+
+            {/* High-Res Water Bottle (Hydro Flask / Glass Bottle Style) */}
+            <group position={[0.34, 0.68, -0.66]} rotation={[0, Math.PI / 4, 0]}>
+               {/* Bottle Body - Transparent Plastic/Glass */}
+               <mesh position={[0, 0.12, 0]} castShadow receiveShadow>
+                  <cylinderGeometry args={[0.045, 0.045, 0.24, 32]} />
+                  <meshPhysicalMaterial
+                     color="#a8d8ea"
+                     roughness={0.1}
+                     metalness={0.1}
+                     transmission={0.9}
+                     thickness={0.02}
+                     transparent
+                     opacity={0.8}
+                  />
+               </mesh>
+               {/* Water Inside */}
+               <mesh position={[0, 0.08, 0]}>
+                  <cylinderGeometry args={[0.04, 0.04, 0.15, 32]} />
+                  <meshPhysicalMaterial
+                     color="#00a8ff"
+                     roughness={0.2}
+                     transmission={0.6}
+                     transparent
+                     opacity={0.6}
+                  />
+               </mesh>
+               {/* Cap - Metallic Silver */}
+               <mesh position={[0, 0.25, 0]} castShadow>
+                  <cylinderGeometry args={[0.046, 0.046, 0.03, 32]} />
+                  <meshStandardMaterial color="#cccccc" metalness={0.8} roughness={0.2} />
+               </mesh>
+               {/* Silicone Grip / Band */}
+               <mesh position={[0, 0.1, 0]}>
+                  <cylinderGeometry args={[0.046, 0.046, 0.03, 32]} />
+                  <meshStandardMaterial color="#333333" roughness={0.9} />
+               </mesh>
+            </group>
+
+            {/* LARGE DESK MAT / MOUSE PAD - 4:2 aspect ratio */}
+            <group position={[0.08, 0.68, 0]} rotation={[0, Math.PI / 2, 0]}>
+               {/* Main Mat Surface - Lifted slightly to prevent flickering/Z-fighting */}
+               <mesh position={[0, 0.001, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+                  <planeGeometry args={[1.2, 0.6]} />
+                  <meshStandardMaterial
+                     map={deskMatTexture}
+                     roughness={0.7}
+                     metalness={0.1}
+                  />
+               </mesh>
+               {/* Mat Thickness / Edge */}
+               <mesh position={[0, -0.003, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+                  <boxGeometry args={[1.2, 0.6, 0.006]} />
+                  <meshStandardMaterial color="#0d0d0d" roughness={0.9} />
+               </mesh>
+               {/* Stitched Edge Detail - Top */}
+               <mesh position={[0, 0.001, -0.295]} rotation={[-Math.PI / 2, 0, 0]}>
+                  <planeGeometry args={[1.19, 0.015]} />
+                  <meshBasicMaterial color="#333333" />
+               </mesh>
+               {/* Stitched Edge Detail - Bottom */}
+               <mesh position={[0, 0.001, 0.295]} rotation={[-Math.PI / 2, 0, 0]}>
+                  <planeGeometry args={[1.19, 0.015]} />
+                  <meshBasicMaterial color="#333333" />
+               </mesh>
+               {/* Stitched Edge Detail - Left */}
+               <mesh position={[-0.595, 0.001, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+                  <planeGeometry args={[0.015, 0.59]} />
+                  <meshBasicMaterial color="#333333" />
+               </mesh>
+               {/* Stitched Edge Detail - Right */}
+               <mesh position={[0.595, 0.001, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+                  <planeGeometry args={[0.015, 0.59]} />
+                  <meshBasicMaterial color="#333333" />
+               </mesh>
+            </group>
+
+            {/* Ultrawide Monitor - Refined Pro Design */}
+            <group position={[-0.05, 0.67, -0.08]}>
+               {/* Monitor Stand Base - Sleek Matte Plate */}
+               <mesh position={[-0.12, 0.01, 0]} castShadow receiveShadow>
+                  <boxGeometry args={[0.18, 0.02, 0.22]} />
+                  <meshStandardMaterial color="#ffffff" metalness={0.5} roughness={0.2} />
+               </mesh>
+               {/* Monitor Stand Neck */}
+               <mesh position={[-0.12, 0.25, 0]} castShadow>
+                  <boxGeometry args={[0.02, 0.5, 0.05]} />
+                  <meshStandardMaterial color="#ffffff" metalness={0.5} roughness={0.2} />
+               </mesh>
+               {/* Hinge/Connector between Neck and Back of Monitor */}
+               <mesh position={[-0.07, 0.42, 0]} castShadow>
+                  <boxGeometry args={[0.1, 0.04, 0.04]} />
+                  <meshStandardMaterial color="#ffffff" metalness={0.5} roughness={0.2} />
+               </mesh>
+
+               {/* Monitor Screen Body - Premium Rounded Edges */}
+               <group position={[0, 0.42, 0]} rotation={[0, Math.PI / 2, 0]}>
+                  <RoundedBox args={[0.92, 0.52, 0.03]} radius={0.015} smoothness={4} castShadow>
+                     <meshStandardMaterial color="#ffffff" metalness={0.5} roughness={0.4} />
+                     {monitorHovered && (
+                        <Edges scale={1.0} threshold={15} color="#2a1b12" />
+                     )}
+                  </RoundedBox>
+               </group>
+
+               {/* Monitor Display - High Clarity Mesh (No reflections/wash-out) */}
+               <mesh position={[0.018, 0.42, 0]} rotation={[0, Math.PI / 2, 0]}>
+                  <planeGeometry args={[0.9, 0.5]} />
+                  <meshBasicMaterial
+                     map={monitorTexture}
+                     toneMapped={false}
+                     color="#dbeafe" // Slight blue hue adjustment
+                  />
+               </mesh>
+
+               {/* Floating Animated Button Indicator (Bottom Right of Monitor) */}
+               <group position={[0.08, 0.67, 0]} rotation={[0, Math.PI / 2, 0]} scale={0.95}>
+                  <AnimatedSwitchButton
+                     disabled={!isDoorOpen}
+                     onClick={onToggleAI}
+                     label="AI COMPANION"
+                     emphasis={true}
+                  />
+               </group>
+
+               {/* Keyboard on Desk Mat */}
+               <group position={[0.02, 0.6885, 0.15]} rotation={[0, Math.PI / 2, 0]}>
+                  {/* Keyboard Body */}
+                  <mesh castShadow receiveShadow>
+                     <boxGeometry args={[0.4, 0.015, 0.12]} />
+                     <meshStandardMaterial
+                        map={keyboardTexture}
+                        roughness={0.4}
+                        metalness={0.1}
+                     />
+                  </mesh>
+                  {/* Keyboard Keys - Subtle Raised Effect */}
+                  <mesh position={[0, 0.008, 0]}>
+                     <boxGeometry args={[0.38, 0.005, 0.10]} />
+                     <meshStandardMaterial color="#1a1a1a" roughness={0.8} />
+                  </mesh>
+               </group>
+
+               {/* Mouse to the right of Keyboard */}
+               <group position={[0.28, 0.6935, 0.18]} rotation={[0, Math.PI / 2, 0]}>
+                  {/* Mouse Body - Ergonomic Shape */}
+                  <mesh castShadow receiveShadow>
+                     <boxGeometry args={[0.06, 0.025, 0.09]} />
+                     <meshStandardMaterial color="#1a1a1a" roughness={0.3} metalness={0.1} />
+                  </mesh>
+                  {/* Mouse Scroll Wheel */}
+                  <mesh position={[0, 0.015, 0]}>
+                     <cylinderGeometry args={[0.008, 0.008, 0.02]} />
+                     <meshStandardMaterial color="#333333" roughness={0.5} />
+                  </mesh>
+                  {/* Mouse Buttons Line */}
+                  <mesh position={[0, 0.013, -0.015]}>
+                     <boxGeometry args={[0.05, 0.002, 0.001]} />
+                     <meshStandardMaterial color="#2a2a2a" />
+                  </mesh>
+               </group>
+            </group>
+
+            {/* Shadow under Desk */}
+            <mesh position={[-roomWidth / 2 + 0.5, 0.001, -1.25]} rotation={[-Math.PI / 2, 0, 0]}>
+               <planeGeometry args={[1.05, 3.55]} />
+               <meshBasicMaterial color="#000000" transparent opacity={0.15} depthWrite={false} />
+            </mesh>
+         </group>
+
+         {/* Wardrobe / Closet (Moved to Drawer Position) */}
+         {/* Wardrobe Contact Shadow - Soft block shadow */}
+         <mesh position={[roomWidth / 2 - 0.35, 0.002, roomDepth / 2 - 1.2]} rotation={[-Math.PI / 2, 0, 0]}>
+            <planeGeometry args={[0.65, 1.45]} />
+            <meshBasicMaterial color="#000000" transparent opacity={0.12} depthWrite={false} />
+         </mesh>
+         <group
+            position={[roomWidth / 2 - 0.35, 1.2, roomDepth / 2 - 1.2]}
+            onPointerOver={(e) => {
+               e.stopPropagation();
+               if (!isDoorOpen) return;
+               setWardrobeHovered(true);
+               document.body.style.cursor = 'pointer';
+            }}
+            onPointerOut={(e) => {
+               e.stopPropagation();
+               setWardrobeHovered(false);
+               document.body.style.cursor = 'auto';
+            }}
+            onClick={(e) => {
+               e.stopPropagation();
+               if (isDoorOpen) onToggleWardrobe();
+            }}
+         >
+            {/* Main Cabinet */}
+            <mesh castShadow receiveShadow>
+               <boxGeometry args={[0.6, 2.4, 1.4]} />
+               <meshStandardMaterial map={cabinetTexture} roughness={0.4} />
+            </mesh>
+            {/* Thicker Edge Outline for Cabinet */}
+            {wardrobeHovered && (
+               <mesh position={[0, 0, 0]}>
+                  <boxGeometry args={[0.61, 2.41, 1.41]} />
+                  <meshBasicMaterial color="white" transparent opacity={0} />
+                  <Edges lineWidth={3} color="white" />
+               </mesh>
+            )}
+
+            {/* Doors (Left and Right) */}
+            <group position={[-0.31, 0, 0]}>
+               {/* Left Door */}
+               <mesh position={[0, 0, -0.35]}>
+                  <boxGeometry args={[0.02, 2.3, 0.68]} />
+                  <meshBasicMaterial map={wardrobeTexture} />
+               </mesh>
+               {wardrobeHovered && (
+                  <mesh position={[0, 0, -0.35]}>
+                     <boxGeometry args={[0.03, 2.31, 0.69]} />
+                     <meshBasicMaterial color="white" transparent opacity={0} />
+                     <Edges lineWidth={3} color="white" />
+                  </mesh>
+               )}
+               {/* Right Door */}
+               <mesh position={[0, 0, 0.35]}>
+                  <boxGeometry args={[0.02, 2.3, 0.68]} />
+                  <meshBasicMaterial map={wardrobeTexture} />
+               </mesh>
+               {wardrobeHovered && (
+                  <mesh position={[0, 0, 0.35]}>
+                     <boxGeometry args={[0.03, 2.31, 0.69]} />
+                     <meshBasicMaterial color="white" transparent opacity={0} />
+                     <Edges lineWidth={3} color="white" />
+                  </mesh>
+               )}
+
+               {/* Vertical Handles */}
+               <mesh position={[-0.02, 0, -0.05]}>
+                  <boxGeometry args={[0.02, 0.4, 0.02]} />
+                  <meshStandardMaterial color="#000000" />
+               </mesh>
+               <mesh position={[-0.02, 0, 0.05]}>
+                  <boxGeometry args={[0.02, 0.4, 0.02]} />
+                  <meshStandardMaterial color="#000000" />
+               </mesh>
+            </group>
+
+            {/* Floating Animated Button Indicator (Closet Door) */}
+            <group position={[-0.35, 0, 0]} rotation={[0, -Math.PI / 2, 0]}>
+               <AnimatedSwitchButton
+                  disabled={!isDoorOpen}
+                  onClick={onToggleWardrobe}
+               />
+            </group>
+
+            {/* Wardrobe Tooltip - Matched to GitHub Icon Style but scaled down and no bars */}
+            {wardrobeHovered && (
+               <Html position={[-0.45, 0.6, 0]} center distanceFactor={6}>
+                  <div className="github-tooltip no-bars" style={{ transform: 'scale(0.7)', pointerEvents: 'none' }}>
+                     <h1>
+                        <span className="word">MY</span>
+                        <span className="word superscript">PROJECTS</span>
+                     </h1>
+                  </div>
+               </Html>
+            )}
+         </group>
+
+         {/* PC Chair - Positioned close to Desk */}
+         <group position={[-2.66, 0, -1.15]} rotation={[0, -Math.PI / 2, 0]}>
+            {/* Base / Casters - Chrome Finish */}
+            <mesh position={[0, 0.02, 0]}>
+               <cylinderGeometry args={[0.35, 0.35, 0.05]} />
+               <meshStandardMaterial color="#d0d0d0" metalness={0.95} roughness={0.1} />
+            </mesh>
+            {/* Piston - Chrome Finish */}
+            <mesh position={[0, 0.2, 0]}>
+               <cylinderGeometry args={[0.04, 0.04, 0.4]} />
+               <meshStandardMaterial color="#c0c0c0" metalness={0.95} roughness={0.05} />
+            </mesh>
+
+            {/* Seat */}
+            <group position={[0, 0.45, 0]}>
+               <RoundedBox args={[0.55, 0.12, 0.55]} radius={0.05} smoothness={4} castShadow>
+                  <meshStandardMaterial map={chairTexture} roughness={1} />
+               </RoundedBox>
+            </group>
+
+            {/* Backrest - Ergonomic Rounded */}
+            <group position={[0, 1.0, -0.28]} rotation={[-0.15, 0, 0]}>
+               <RoundedBox args={[0.5, 0.8, 0.08]} radius={0.06} smoothness={4} castShadow>
+                  <meshStandardMaterial map={chairTexture} roughness={1} />
+               </RoundedBox>
+            </group>
+
+            {/* Backrest Connectors - Structural Bars Black */}
+            {[-0.15, 0.15].map((x, i) => (
+               <mesh key={i} position={[x, 0.65, -0.26]} rotation={[0.1, 0, 0]}>
+                  <boxGeometry args={[0.04, 0.4, 0.03]} />
+                  <meshStandardMaterial color="#000000" />
+               </mesh>
+            ))}
+
+            {/* Armrests - Stealth Black */}
+            {[-0.32, 0.32].map((x, i) => (
+               <group key={i} position={[x, 0.7, 0.05]}>
+                  {/* Armrest Vertical Support */}
+                  <mesh position={[0, -0.1, 0]}>
+                     <boxGeometry args={[0.02, 0.3, 0.02]} />
+                     <meshStandardMaterial color="#000000" />
+                  </mesh>
+                  {/* Armrest Padding */}
+                  <RoundedBox args={[0.1, 0.05, 0.35]} radius={0.02} smoothness={4} position={[0, 0.05, 0]}>
+                     <meshStandardMaterial color="#000000" roughness={0.6} />
+                  </RoundedBox>
+               </group>
+            ))}
+         </group>
+      </group>
+   );
+};
